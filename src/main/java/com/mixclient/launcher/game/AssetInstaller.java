@@ -76,23 +76,38 @@ public final class AssetInstaller {
                 if (!VersionResolver.rulesAllowed(library.get("rules"), features)) {
                     continue;
                 }
+                // Old Forge profiles mark server-only libraries such as jline this way.
+                if (library.has("clientreq") && !library.get("clientreq").getAsBoolean()) {
+                    continue;
+                }
 
                 String name = library.has("name") ? library.get("name").getAsString() : "";
                 JsonObject libDownloads = library.getAsJsonObject("downloads");
                 JsonObject artifact = libDownloads != null && libDownloads.has("artifact")
                         ? libDownloads.getAsJsonObject("artifact") : null;
 
+                Path artifactFile = null;
                 if (artifact != null && artifact.has("path")) {
                     String path = artifact.get("path").getAsString();
                     String url = artifact.has("url") ? artifact.get("url").getAsString() : mavenUrl(library, path);
-                    Path target = librariesDir.resolve(path);
+                    artifactFile = librariesDir.resolve(path);
                     progress.update("Library " + shortName(name), fraction);
                     if (url != null && !url.isBlank()) {
-                        api.downloadIfMissing(url, target);
+                        api.downloadIfMissing(url, artifactFile);
                     }
-                    if (Files.exists(target)) {
-                        classpath.add(target);
+                } else if (libDownloads == null) {
+                    // Forge and Fabric profiles list plain maven coordinates instead of downloads.
+                    // A downloads block without an artifact means natives-only (LWJGL 2), so the
+                    // classifier below is the only jar to fetch.
+                    String path = mavenPath(name);
+                    if (path != null) {
+                        artifactFile = librariesDir.resolve(path);
+                        progress.update("Library " + shortName(name), fraction);
+                        api.downloadIfMissing(mavenUrl(library, path), artifactFile);
                     }
+                }
+                if (artifactFile != null && Files.exists(artifactFile)) {
+                    classpath.add(artifactFile);
                 }
 
                 // Old versions ship natives as classifier jars that must be extracted.
@@ -306,6 +321,26 @@ public final class AssetInstaller {
             }
         }
         return false;
+    }
+
+    /** Turns {@code group:artifact:version[:classifier][@ext]} into a maven repository path. */
+    private static String mavenPath(String name) {
+        if (name == null || name.isBlank()) {
+            return null;
+        }
+        String extension = "jar";
+        int at = name.indexOf('@');
+        if (at >= 0) {
+            extension = name.substring(at + 1);
+            name = name.substring(0, at);
+        }
+        String[] parts = name.split(":");
+        if (parts.length < 3 || parts[0].isBlank() || parts[1].isBlank() || parts[2].isBlank()) {
+            return null;
+        }
+        String classifier = parts.length > 3 && !parts[3].isBlank() ? "-" + parts[3] : "";
+        String fileName = parts[1] + "-" + parts[2] + classifier + "." + extension;
+        return parts[0].replace('.', '/') + "/" + parts[1] + "/" + parts[2] + "/" + fileName;
     }
 
     private static String mavenUrl(JsonObject library, String path) {

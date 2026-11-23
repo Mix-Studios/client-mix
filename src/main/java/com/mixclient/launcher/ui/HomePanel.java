@@ -11,6 +11,7 @@ import com.mixclient.launcher.core.Progress;
 import com.mixclient.launcher.game.AssetInstaller;
 import com.mixclient.launcher.game.GameLauncher;
 import com.mixclient.launcher.game.JavaRuntime;
+import com.mixclient.launcher.game.LoaderInstaller;
 import com.mixclient.launcher.game.MojangApi;
 import com.mixclient.launcher.game.PreparedInstall;
 
@@ -337,6 +338,19 @@ public final class HomePanel extends JPanel {
                 SwingUtilities.invokeLater(this::refreshAccount);
 
                 Path gameDir = gameDir();
+                Progress reporter = new Progress() {
+                    @Override
+                    public void update(String message, double fraction) {
+                        SwingUtilities.invokeLater(() -> updateStatus(message, fraction));
+                    }
+                };
+
+                // Vanilla ignores mods/, so the bundled client only runs through its loader.
+                LoaderInstaller.Loader loader = LoaderInstaller.ensure(versionId, gameDir, reporter);
+                if (!loader.name().isEmpty()) {
+                    logPanel.append("[loader] " + versionId + " runs on " + loader.name()
+                            + " as " + loader.versionId());
+                }
 
                 // The client ships inside the launcher: put the matching build in mods/ first.
                 try {
@@ -351,19 +365,15 @@ public final class HomePanel extends JPanel {
                     logPanel.append("[client] Could not install the bundled client: " + e.getMessage());
                 }
 
-                logPanel.append("[launch] Preparing " + versionId + " in " + gameDir);
+                logPanel.append("[launch] Preparing " + loader.versionId() + " in " + gameDir);
                 PreparedInstall install = new AssetInstaller(new MojangApi(AppPaths.cacheDir()), gameDir)
-                        .prepare(versionId, new Progress() {
-                            @Override
-                            public void update(String message, double fraction) {
-                                SwingUtilities.invokeLater(() -> updateStatus(message, fraction));
-                            }
-                        });
+                        .prepare(loader.versionId(), reporter);
 
                 // Java is chosen per version (1.8.9 needs an Intel Java 8, 26.3 needs 25+); a
                 // missing runtime fails here with an actionable message instead of exit code 1.
-                JavaRuntime.Match java = JavaRuntime.resolve(versionId, install.requiredJavaMajor(), config);
-                logPanel.append("[java] " + versionId + " needs Java " + install.requiredJavaMajor()
+                JavaRuntime.Match java = JavaRuntime.resolve(install.versionId(),
+                        install.requiredJavaMajor(), config);
+                logPanel.append("[java] " + loader.versionId() + " needs Java " + install.requiredJavaMajor()
                         + "+; using Java " + java.major() + " (" + java.arch() + "): " + java.java());
 
                 SwingUtilities.invokeLater(() -> updateStatus("Starting Minecraft…", 1.0));
@@ -451,6 +461,8 @@ public final class HomePanel extends JPanel {
                     stream.filter(Files::isDirectory)
                             .filter(path -> Files.exists(path.resolve(path.getFileName() + ".json")))
                             .map(path -> path.getFileName().toString())
+                            // Loader profiles are installed by the launcher, not picked by hand.
+                            .filter(id -> !LoaderInstaller.isLoaderProfile(id))
                             .sorted()
                             .forEach(ids::add);
                 } catch (IOException ignored) {

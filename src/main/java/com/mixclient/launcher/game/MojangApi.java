@@ -1,6 +1,7 @@
 package com.mixclient.launcher.game;
 
 import com.google.gson.Gson;
+import com.google.gson.JsonArray;
 import com.google.gson.JsonObject;
 import com.google.gson.JsonParser;
 import com.mixclient.launcher.core.Progress;
@@ -84,6 +85,11 @@ public final class MojangApi {
     public JsonObject fetchJson(String url) throws IOException {
         HttpResponse<String> response = send(URI.create(url), HttpResponse.BodyHandlers.ofString());
         return JsonParser.parseString(response.body()).getAsJsonObject();
+    }
+
+    public JsonArray fetchJsonArray(String url) throws IOException {
+        HttpResponse<String> response = send(URI.create(url), HttpResponse.BodyHandlers.ofString());
+        return JsonParser.parseString(response.body()).getAsJsonArray();
     }
 
     public JsonObject readJson(Path file) throws IOException {
