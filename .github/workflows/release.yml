@@ -137,9 +137,28 @@ jobs:
           chmod +x gradlew
           ./gradlew --no-daemon fatJar \
             -PlauncherVersion="$version" \
-            -PclientVersion="$version"
-          # The client must actually be inside the launcher.
-          unzip -l build/libs/*-all.jar client/index.json >/dev/null
+            -PclientVersion="$version" \
+            -PrequireClients=1.8.9,26.3
+
+      # A client change ships as a new launcher version or not at all: the embedded
+      # jars, the client version in the index and the launcher version are one release.
+      - name: Check the embedded clients match the release
+        run: |
+          set -euo pipefail
+          version="${VERSION#v}"
+          unzip -p build/libs/*-all.jar client/index.json > client-index.json
+          python3 - "$version" client-index.json <<'PY'
+          import json, sys
+
+          version, path = sys.argv[1], sys.argv[2]
+          index = json.load(open(path))
+          assert index["clientVersion"] == version, (
+              f"client/index.json says {index['clientVersion']}, the release is {version}")
+          modules = {m["gameVersion"]: m["file"] for m in index["modules"]}
+          missing = {"1.8.9", "26.3"} - set(modules)
+          assert not missing, f"no client jar for {sorted(missing)}"
+          print("embedded clients:", ", ".join(f"{v} -> {f}" for v, f in sorted(modules.items())))
+          PY
 
       - name: Collect the jar
         run: |
@@ -231,7 +250,8 @@ jobs:
           ./gradlew --no-daemon packageInstaller \
             -PinstallerType=${{ matrix.type }} \
             -PlauncherVersion="$version" \
-            -PclientVersion="$version"
+            -PclientVersion="$version" \
+            -PrequireClients=1.8.9,26.3
 
       - name: Collect the installer
         shell: bash

@@ -125,6 +125,9 @@ tasks.register('fatJar', Jar) {
 // ---------------------------------------------------------------------------
 def clientLibs = file(findProperty('clientDir') ?: 'client-libs')
 def bundledClientVersion = (findProperty('clientVersion') ?: project.version).toString()
+// Release builds list the clients that must be present, e.g. -PrequireClients=1.8.9,26.3.
+def requiredClients = (findProperty('requireClients') ?: '').toString()
+        .split(',').collect { it.trim() }.findAll { !it.isEmpty() }
 
 tasks.register('bundleClient', Sync) {
     group = 'distribution'
@@ -151,12 +154,33 @@ tasks.register('bundleClient', Sync) {
             }
         }
 
+        // A release always carries every client it supports...
+        def missing = requiredClients.findAll { version ->
+            !modules.any { it.gameVersion == version }
+        }
+        if (!missing.isEmpty()) {
+            throw new GradleException("bundleClient: no client jar for ${missing.join(', ')}"
+                    + " in ${clientLibs}. Build the client for this release first.")
+        }
+
+        // ...and never a client built for a different launcher version: the client and the
+        // launcher ship as one version, so updating the client always updates the launcher.
+        def stale = modules.findAll { module ->
+            !module.file.contains(bundledClientVersion)
+        }
+        if (!stale.isEmpty()) {
+            throw new GradleException("bundleClient: "
+                    + stale.collect { "${it.gameVersion}/${it.file}" }.join(', ')
+                    + " isn't built for client ${bundledClientVersion}; rebuild the client for this release.")
+        }
+
         def index = new groovy.json.JsonBuilder([
                 clientVersion: bundledClientVersion,
                 modules      : modules
         ])
         new File(outputDir, 'index.json').text = index.toPrettyString()
-        logger.lifecycle("bundleClient: ${modules.size()} client jar(s) from ${clientLibs}")
+        logger.lifecycle("bundleClient: ${modules.size()} client jar(s) from ${clientLibs}"
+                + " (client ${bundledClientVersion})")
     }
 }
 
