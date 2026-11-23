@@ -114,7 +114,14 @@ public final class Updater {
             System.err.println("[update] latest.json unavailable (" + e.getMessage()
                     + "); falling back to the GitHub API");
         }
-        return fromApi();
+        try {
+            return fromApi();
+        } catch (TestBuildException e) {
+            // Nothing stable is newer: treat it as up to date rather than as a failed check.
+            System.err.println("[update] " + e.getMessage() + "; staying on "
+                    + BuildInfo.VERSION);
+            return Optional.empty();
+        }
     }
 
     /**
