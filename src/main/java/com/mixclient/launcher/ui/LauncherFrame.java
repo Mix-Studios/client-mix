@@ -14,6 +14,7 @@ import javax.swing.JButton;
 import javax.swing.JComponent;
 import javax.swing.JFrame;
 import javax.swing.JLabel;
+import javax.swing.JOptionPane;
 import javax.swing.JPanel;
 import javax.swing.JToggleButton;
 import javax.swing.SwingUtilities;
@@ -66,7 +67,7 @@ public final class LauncherFrame extends JFrame {
         getContentPane().setBackground(Theme.BG);
 
         homePanel = new HomePanel(this, config, accounts, logPanel);
-        settingsPanel = new SettingsPanel(config, updated -> refreshFooter());
+        settingsPanel = new SettingsPanel(config, updated -> refreshFooter(), this::rollBack);
 
         cards.setOpaque(false);
         cards.add(homePanel, "home");
@@ -258,6 +259,28 @@ public final class LauncherFrame extends JFrame {
 
     private void refreshFooter() {
         footer.setText("Data: " + AppPaths.appDir());
+    }
+
+    /**
+     * Goes back to the build kept as {@code .old}: the swap runs in the background, then this
+     * window closes so the helper can replace the jar it is running from.
+     */
+    private void rollBack() {
+        Thread worker = new Thread(() -> {
+            try {
+                Updater.rollback(AppPaths.appDir().resolve("updates"), this::setUpdateStatus);
+                SwingUtilities.invokeLater(() -> System.exit(0));
+            } catch (Exception e) {
+                SwingUtilities.invokeLater(() -> {
+                    setUpdateStatus("Rollback failed: " + e.getMessage());
+                    JOptionPane.showMessageDialog(this, "Couldn't go back: " + e.getMessage(),
+                            "MixClient", JOptionPane.ERROR_MESSAGE);
+                });
+                System.err.println("[rollback] " + e);
+            }
+        }, "mixclient-rollback");
+        worker.setDaemon(true);
+        worker.start();
     }
 
     /** Shows what the updater is doing in the status bar. */

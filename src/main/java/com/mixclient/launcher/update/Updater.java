@@ -28,6 +28,7 @@ import java.util.Locale;
 import java.util.Map;
 import java.util.Optional;
 import java.util.function.Consumer;
+import java.util.jar.JarFile;
 import java.util.regex.Pattern;
 
 /**
@@ -72,6 +73,8 @@ public final class Updater {
      * {@code --apply-update <new jar> <installed jar> <pid of the launcher> <version>}.
      */
     public static final String HELPER_FLAG = "--apply-update";
+    /** Puts the {@code .old} build back without downloading anything or opening a window. */
+    public static final String ROLLBACK_FLAG = "--rollback";
 
     /** The release workflow's test rule, so the launcher and the site agree on what is stable. */
     private static final Pattern TEST_WORDS = Pattern.compile(
@@ -573,7 +576,64 @@ public final class Updater {
         }
 
         status.accept("Restarting into MixClient " + release.version() + "…");
-        startSwapHelper(jar, target, release.version());
+        startSwapHelper(jar, target, release.version(), updatesDir);
+    }
+
+    /** True when there is another build beside the running one to go back to. */
+    public static boolean canRollBack() {
+        Path backup = backupOfRunning();
+        return backup != null && Files.isRegularFile(backup);
+    }
+
+    /** The version of the build {@link #rollback} would install, or null when it has none. */
+    public static String previousVersion() {
+        Path backup = backupOfRunning();
+        return backup == null ? null : versionOfJar(backup);
+    }
+
+    /**
+     * Puts the previous build back and starts it, through the same helper an update uses, so it
+     * works on Windows too. The build being replaced stays beside it as {@code .old}, which is what
+     * makes the action reversible: rolling back again returns to where you started.
+     */
+    public static void rollback(Path updatesDir, Consumer<String> status) throws IOException {
+        Path target = BuildInfo.jarPath();
+        if (target == null) {
+            throw new IOException("MixClient isn't running from an installed jar, so there is "
+                    + "nothing to go back to.");
+        }
+        Path backup = backupOfRunning();
+        if (backup == null || !Files.isRegularFile(backup)) {
+            throw new IOException("There is no previous build beside " + target.getFileName()
+                    + " yet; one appears after the first update.");
+        }
+        Files.createDirectories(updatesDir);
+        pruneHelperCopies(updatesDir);
+
+        String version = versionOfJar(backup);
+        status.accept("Going back to MixClient "
+                + (version == null ? "the previous build" : version) + "…");
+        startSwapHelper(backup, target, version == null ? BuildInfo.VERSION : version, updatesDir);
+    }
+
+    /** The {@code .old} jar next to the running one, or null when there is no running jar. */
+    private static Path backupOfRunning() {
+        Path running = BuildInfo.jarPath();
+        return running == null ? null : running.resolveSibling(running.getFileName() + ".old");
+    }
+
+    /** The {@code Implementation-Version} a jar carries, or null when it has none. */
+    private static String versionOfJar(Path jar) {
+        try (JarFile file = new JarFile(jar.toFile())) {
+            if (file.getManifest() == null) {
+                return null;
+            }
+            String version = file.getManifest().getMainAttributes()
+                    .getValue("Implementation-Version");
+            return version == null || version.isBlank() ? null : version.trim();
+        } catch (IOException | RuntimeException e) {
+            return null;
+        }
     }
 
     /**
@@ -584,13 +644,12 @@ public final class Updater {
      * and Windows lets go of the jar it was started from, and it is known to run, so a release that
      * cannot start still gets rolled back instead of leaving the player with nothing.</p>
      */
-    private static void startSwapHelper(Path downloaded, Path target, String version)
-            throws IOException {
+    private static void startSwapHelper(Path downloaded, Path target, String version,
+                                        Path updatesDir) throws IOException {
         Path running = BuildInfo.jarPath();
         if (running == null) {
             throw new IOException("no running jar to start the update helper from");
         }
-        Path updatesDir = downloaded.getParent();
         Path helper = updatesDir.resolve("swap-helper-" + ProcessHandle.current().pid() + ".jar");
         Files.copy(running, helper, StandardCopyOption.REPLACE_EXISTING);
         new ProcessBuilder(javaCommand(), "-jar", helper.toString(),

@@ -2,6 +2,7 @@ package com.mixclient.launcher.ui;
 
 import com.mixclient.launcher.core.AppPaths;
 import com.mixclient.launcher.core.LauncherConfig;
+import com.mixclient.launcher.update.Updater;
 
 import javax.swing.Box;
 import javax.swing.BoxLayout;
@@ -9,6 +10,7 @@ import javax.swing.JButton;
 import javax.swing.JCheckBox;
 import javax.swing.JFileChooser;
 import javax.swing.JLabel;
+import javax.swing.JOptionPane;
 import javax.swing.JPanel;
 import javax.swing.JScrollPane;
 import javax.swing.JSpinner;
@@ -28,6 +30,7 @@ public final class SettingsPanel extends JPanel {
 
     private final LauncherConfig config;
     private final Consumer<LauncherConfig> onSaved;
+    private final Runnable onRollBack;
 
     private final JTextField gameDirField = new JTextField();
     private final JSpinner maxMemory = new JSpinner(new SpinnerNumberModel(4096, 1024, 65536, 512));
@@ -37,11 +40,14 @@ public final class SettingsPanel extends JPanel {
     private final JTextArea jvmArgs = new JTextArea(4, 40);
     private final JCheckBox pvpFlags = new JCheckBox("Apply PvP-tuned G1 garbage collector flags");
     private final JLabel savedLabel = new JLabel(" ");
+    private final JButton rollBackButton = Theme.secondaryButton("Roll back");
 
-    public SettingsPanel(LauncherConfig config, Consumer<LauncherConfig> onSaved) {
+    public SettingsPanel(LauncherConfig config, Consumer<LauncherConfig> onSaved,
+                         Runnable onRollBack) {
         super(new BorderLayout(0, 8));
         this.config = config;
         this.onSaved = onSaved;
+        this.onRollBack = onRollBack;
         setOpaque(false);
         buildUi();
         loadValues();
@@ -72,7 +78,9 @@ public final class SettingsPanel extends JPanel {
                 resolutionRow(), "Used for --width/--height when the version supports it.");
         row = addRow(form, row, "PvP JVM flags",
                 pvpFlags, "Adds Aikar-style G1 flags that reduce GC hitches in fights.");
-        addRow(form, row, "Extra JVM arguments", new JScrollPane(jvmArgs), null);
+        row = addRow(form, row, "Extra JVM arguments", new JScrollPane(jvmArgs), null);
+        addRow(form, row, "Previous build", previousBuildRow(),
+                "If a new build starts but misbehaves, go back without reinstalling.");
 
         JPanel group = Theme.card(new BorderLayout());
         group.setBorder(Theme.padding(8, 8, 8, 8));
@@ -204,6 +212,46 @@ public final class SettingsPanel extends JPanel {
             form.add(field, right);
         }
         return row + 1;
+    }
+
+    /**
+     * The rollback control: it names the build it would install, and only offers itself when there
+     * is one. Rolling back keeps the current build as {@code .old}, so the same button returns.
+     */
+    private JPanel previousBuildRow() {
+        JPanel panel = new JPanel();
+        panel.setOpaque(false);
+        panel.setLayout(new BoxLayout(panel, BoxLayout.X_AXIS));
+        panel.add(Box.createHorizontalGlue());
+
+        if (!Updater.canRollBack()) {
+            JLabel none = hint("No previous build saved yet; one is kept after each update.");
+            none.setAlignmentX(java.awt.Component.LEFT_ALIGNMENT);
+            panel.add(none);
+            panel.add(Box.createHorizontalGlue());
+            return panel;
+        }
+
+        String version = Updater.previousVersion();
+        rollBackButton.setText(version == null
+                ? "Go back to the previous build" : "Go back to MixClient " + version);
+        rollBackButton.addActionListener(e -> confirmRollBack(version));
+        panel.add(rollBackButton);
+        panel.add(Box.createHorizontalGlue());
+        return panel;
+    }
+
+    private void confirmRollBack(String version) {
+        String target = version == null ? "the previous build" : "MixClient " + version;
+        int answer = JOptionPane.showConfirmDialog(this,
+                "Go back to " + target + "?\n\n"
+                        + "MixClient will restart on that build. This one is kept beside it, so"
+                        + " going back again returns to it.",
+                "Roll back", JOptionPane.OK_CANCEL_OPTION, JOptionPane.QUESTION_MESSAGE);
+        if (answer == JOptionPane.OK_OPTION) {
+            rollBackButton.setEnabled(false);
+            onRollBack.run();
+        }
     }
 
     private void loadValues() {

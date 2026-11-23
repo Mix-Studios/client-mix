@@ -32,6 +32,12 @@ public final class MixClientLauncher {
             Updater.runSwapHelper(args);
             return;
         }
+        // `--rollback` puts the previous build back and restarts it, for a release that starts
+        // but misbehaves.
+        if (args.length > 0 && Updater.ROLLBACK_FLAG.equals(args[0])) {
+            rollbackFromCommandLine();
+            return;
+        }
 
         System.setProperty("apple.awt.application.name", "MixClient");
         installCrashLogHandler();
@@ -104,6 +110,23 @@ public final class MixClientLauncher {
         } catch (Exception e) {
             frame.setUpdateStatus("Update failed: " + e.getMessage());
             System.err.println("[update] " + e);
+        }
+    }
+
+    /** Runs {@code --rollback} from a terminal, without opening the launcher window. */
+    private static void rollbackFromCommandLine() {
+        try {
+            Updater.rollback(AppPaths.appDir().resolve("updates"),
+                    message -> System.out.println("[rollback] " + message));
+            System.out.println("[rollback] MixClient is restarting on the previous build.");
+            System.exit(0);
+        } catch (Exception e) {
+            System.err.println("[rollback] " + e.getMessage());
+            if (!java.awt.GraphicsEnvironment.isHeadless()) {
+                JOptionPane.showMessageDialog(null, "Couldn't go back: " + e.getMessage(),
+                        "MixClient", JOptionPane.ERROR_MESSAGE);
+            }
+            System.exit(1);
         }
     }
 
