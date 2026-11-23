@@ -4,6 +4,7 @@ import com.mixclient.launcher.auth.Account;
 import com.mixclient.launcher.auth.Accounts;
 import com.mixclient.launcher.auth.AuthException;
 import com.mixclient.launcher.auth.PlayerSession;
+import com.mixclient.launcher.client.ClientBundle;
 import com.mixclient.launcher.core.AppPaths;
 import com.mixclient.launcher.core.LauncherConfig;
 import com.mixclient.launcher.core.Progress;
@@ -335,6 +336,20 @@ public final class HomePanel extends JPanel {
                 SwingUtilities.invokeLater(this::refreshAccount);
 
                 Path gameDir = gameDir();
+
+                // The client ships inside the launcher: put the matching build in mods/ first.
+                try {
+                    ClientBundle.Result bundled = ClientBundle.install(versionId, gameDir);
+                    for (String file : bundled.installed()) {
+                        logPanel.append("[client] Installed bundled " + file);
+                    }
+                    for (String file : bundled.removed()) {
+                        logPanel.append("[client] Removed old " + file);
+                    }
+                } catch (IOException e) {
+                    logPanel.append("[client] Could not install the bundled client: " + e.getMessage());
+                }
+
                 logPanel.append("[launch] Preparing " + versionId + " in " + gameDir);
                 PreparedInstall install = new AssetInstaller(new MojangApi(AppPaths.cacheDir()), gameDir)
                         .prepare(versionId, new Progress() {

@@ -2,21 +2,26 @@ package com.mixclient.launcher.ui;
 
 import com.mixclient.launcher.auth.Accounts;
 import com.mixclient.launcher.core.AppPaths;
+import com.mixclient.launcher.core.BuildInfo;
 import com.mixclient.launcher.core.LauncherConfig;
+import com.mixclient.launcher.update.Updater;
 
 import javax.swing.BorderFactory;
 import javax.swing.Box;
 import javax.swing.BoxLayout;
 import javax.swing.ButtonGroup;
+import javax.swing.JButton;
 import javax.swing.JComponent;
 import javax.swing.JFrame;
 import javax.swing.JLabel;
 import javax.swing.JPanel;
 import javax.swing.JToggleButton;
+import javax.swing.SwingUtilities;
 import java.awt.BorderLayout;
 import java.awt.CardLayout;
 import java.awt.Color;
 import java.awt.Dimension;
+import java.awt.FlowLayout;
 import java.awt.GradientPaint;
 import java.awt.Graphics;
 import java.awt.Graphics2D;
@@ -39,6 +44,8 @@ public final class LauncherFrame extends JFrame {
     private final HomePanel homePanel;
     private final SettingsPanel settingsPanel;
     private final JLabel footer = new JLabel(" ");
+    private final JLabel updateLabel = new JLabel(" ");
+    private final JButton updateButton = Theme.secondaryButton("Update");
 
     public LauncherFrame(LauncherConfig config, Accounts accounts) {
         super("MixClient");
@@ -98,7 +105,7 @@ public final class LauncherFrame extends JFrame {
         bar.setBorder(Theme.padding(MAC ? 5 : 2, MAC ? 78 : 8, 2, 8));
         makeDraggable(bar);
 
-        JLabel title = new JLabel("MixClient 1.0.0");
+        JLabel title = new JLabel("MixClient " + BuildInfo.VERSION);
         Theme.styleLabel(title, Theme.BOLD_FONT, Color.WHITE);
 
         JLabel hint = new JLabel("PvP launcher");
@@ -150,7 +157,7 @@ public final class LauncherFrame extends JFrame {
         signIn.setAlignmentX(LEFT_ALIGNMENT);
         sidebar.add(signIn);
 
-        JLabel built = new JLabel("v1.0.0");
+        JLabel built = new JLabel("v" + BuildInfo.VERSION);
         Theme.styleLabel(built, Theme.SMALL_FONT, Theme.MUTED);
         built.setAlignmentX(LEFT_ALIGNMENT);
         sidebar.add(Box.createVerticalStrut(1));
@@ -190,6 +197,16 @@ public final class LauncherFrame extends JFrame {
                 Theme.padding(1, 4, 1, 4)));
         Theme.styleLabel(footer, Theme.SMALL_FONT, Theme.MUTED);
         panel.add(footer, BorderLayout.WEST);
+
+        JPanel updates = new JPanel(new FlowLayout(FlowLayout.RIGHT, 4, 0));
+        updates.setOpaque(false);
+        Theme.styleLabel(updateLabel, Theme.SMALL_FONT, Theme.MUTED);
+        updateButton.setPreferredSize(new Dimension(58, 17));
+        updateButton.setFont(Theme.SMALL_FONT);
+        updateButton.setVisible(false);
+        updates.add(updateLabel);
+        updates.add(updateButton);
+        panel.add(updates, BorderLayout.EAST);
         // 21 leaves room for a 10px line inside the lowered bevel; 18 clipped descenders.
         panel.setPreferredSize(new Dimension(0, 21));
 
@@ -241,5 +258,31 @@ public final class LauncherFrame extends JFrame {
 
     private void refreshFooter() {
         footer.setText("Data: " + AppPaths.appDir());
+    }
+
+    /** Shows what the updater is doing in the status bar. */
+    public void setUpdateStatus(String text) {
+        SwingUtilities.invokeLater(() -> {
+            updateLabel.setText(text == null || text.isBlank() ? " " : text);
+            updateButton.setVisible(false);
+        });
+    }
+
+    /** Offers a new release, with the button running {@code onInstall} on the caller's thread. */
+    public void setUpdateAvailable(Updater.Release release, Runnable onInstall) {
+        SwingUtilities.invokeLater(() -> {
+            updateLabel.setText("MixClient " + release.version() + " is available");
+            updateButton.setVisible(true);
+            updateButton.setEnabled(true);
+            updateButton.setText("Update");
+            for (java.awt.event.ActionListener listener : updateButton.getActionListeners()) {
+                updateButton.removeActionListener(listener);
+            }
+            updateButton.addActionListener(e -> {
+                updateButton.setEnabled(false);
+                updateButton.setText("Updating…");
+                onInstall.run();
+            });
+        });
     }
 }

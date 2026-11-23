@@ -4,6 +4,7 @@ import com.google.gson.JsonArray;
 import com.google.gson.JsonElement;
 import com.google.gson.JsonObject;
 import com.mixclient.launcher.auth.PlayerSession;
+import com.mixclient.launcher.core.BuildInfo;
 import com.mixclient.launcher.core.LauncherConfig;
 
 import java.io.BufferedReader;
@@ -32,7 +33,7 @@ import java.util.function.Consumer;
 public final class GameLauncher {
 
     private static final String LAUNCHER_BRAND = "MixClient";
-    private static final String LAUNCHER_VERSION = "1.0.0";
+    private static final String LAUNCHER_VERSION = BuildInfo.VERSION;
 
     private GameLauncher() {
     }

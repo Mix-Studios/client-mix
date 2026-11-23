@@ -49,6 +49,11 @@ public final class LauncherConfig {
     public String selectedVersion = "";
     public String lastAccountId = "";
     public boolean closeLauncherOnLaunch = false;
+    /**
+     * Install newer releases automatically instead of only reporting them. The client ships
+     * inside the launcher, so this also delivers client updates.
+     */
+    public boolean autoUpdate = true;
 
     public static LauncherConfig load() {
         Path file = AppPaths.configFile();

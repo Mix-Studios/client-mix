@@ -3,7 +3,8 @@ plugins {
 }
 
 group = 'com.mixclient'
-version = '1.0.0'
+// A release tag sets this, so the launcher (and the client it bundles) carry one version.
+version = findProperty('launcherVersion') ?: '1.0.0'
 
 repositories {
     mavenCentral()
@@ -110,6 +111,58 @@ tasks.register('fatJar', Jar) {
         configurations.runtimeClasspath.collect { it.isDirectory() ? it : zipTree(it) }
     } {
         exclude 'META-INF/*.SF', 'META-INF/*.DSA', 'META-INF/*.RSA', 'module-info.class'
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Bundled client.
+//
+// The client mod ships inside the launcher jar, so one launcher release always
+// carries one client version and updating the client means publishing a new
+// launcher. The release workflow builds the client first and drops its jars in
+// client-libs/<minecraft version>/ before building the launcher; a plain local
+// build embeds whatever is in that folder.
+// ---------------------------------------------------------------------------
+def clientLibs = file(findProperty('clientDir') ?: 'client-libs')
+def bundledClientVersion = (findProperty('clientVersion') ?: project.version).toString()
+
+tasks.register('bundleClient', Sync) {
+    group = 'distribution'
+    description = 'Packs the client jars into the launcher jar under client/<minecraft version>/.'
+
+    from clientLibs
+    include '**/*.jar'
+    // macOS drops "._name" metadata next to files on the SMB share; it is not a jar.
+    exclude '**/._*'
+    into layout.buildDirectory.dir('generated/client')
+    // The index is written after the copy, so this task always re-runs.
+    outputs.upToDateWhen { false }
+
+    doLast {
+        def outputDir = layout.buildDirectory.dir('generated/client').get().asFile
+        def modules = []
+        if (clientLibs.isDirectory()) {
+            clientLibs.eachDir { versionDir ->
+                versionDir.eachFileMatch(~/.*\.jar$/) { jar ->
+                    if (!jar.name.startsWith('._')) {
+                        modules << [gameVersion: versionDir.name, file: jar.name]
+                    }
+                }
+            }
+        }
+
+        def index = new groovy.json.JsonBuilder([
+                clientVersion: bundledClientVersion,
+                modules      : modules
+        ])
+        new File(outputDir, 'index.json').text = index.toPrettyString()
+        logger.lifecycle("bundleClient: ${modules.size()} client jar(s) from ${clientLibs}")
+    }
+}
+
+tasks.named('processResources') {
+    from(tasks.named('bundleClient')) {
+        into 'client'
     }
 }
 
