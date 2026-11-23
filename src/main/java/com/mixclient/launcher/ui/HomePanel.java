@@ -10,6 +10,7 @@ import com.mixclient.launcher.core.LauncherConfig;
 import com.mixclient.launcher.core.Progress;
 import com.mixclient.launcher.game.AssetInstaller;
 import com.mixclient.launcher.game.GameLauncher;
+import com.mixclient.launcher.game.JavaRuntime;
 import com.mixclient.launcher.game.MojangApi;
 import com.mixclient.launcher.game.PreparedInstall;
 
@@ -359,14 +360,11 @@ public final class HomePanel extends JPanel {
                             }
                         });
 
-                int requiredJava = install.requiredJavaMajor();
-                boolean customJava = config.javaPath != null && !config.javaPath.isBlank();
-                int availableJava = Runtime.version().feature();
-                if (!customJava && requiredJava > availableJava) {
-                    throw new IOException("Minecraft " + versionId + " needs Java " + requiredJava
-                            + " or newer, but MixClient is running on Java " + availableJava
-                            + ". Install Java " + requiredJava + " and set it under Settings → Java executable.");
-                }
+                // Java is chosen per version (1.8.9 needs an Intel Java 8, 26.3 needs 25+); a
+                // missing runtime fails here with an actionable message instead of exit code 1.
+                JavaRuntime.Match java = JavaRuntime.resolve(versionId, install.requiredJavaMajor(), config);
+                logPanel.append("[java] " + versionId + " needs Java " + install.requiredJavaMajor()
+                        + "+; using Java " + java.major() + " (" + java.arch() + "): " + java.java());
 
                 SwingUtilities.invokeLater(() -> updateStatus("Starting Minecraft…", 1.0));
                 GameLauncher.start(install, session, config, logPanel::append,

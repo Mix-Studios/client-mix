@@ -77,7 +77,9 @@ public final class GameLauncher {
         Map<String, String> vars = placeholders(install, session, classpath, config);
 
         List<String> command = new ArrayList<>();
-        command.add(javaExecutable(config).toString());
+        // Each version gets the Java it was built for: 1.8.9 wants an Intel Java 8, 26.3 needs 25+.
+        command.add(JavaRuntime.forVersion(install.versionId(), install.requiredJavaMajor(), config)
+                .toString());
         command.add("-Xms" + config.minMemoryMb + "M");
         command.add("-Xmx" + config.maxMemoryMb + "M");
         command.addAll(splitArguments(config.jvmArgs));

@@ -66,7 +66,8 @@ public final class SettingsPanel extends JPanel {
         row = addRow(form, row, "Game directory",
                 withBrowse(gameDirField, true), null);
         row = addRow(form, row, "Java executable",
-                withBrowse(javaField, false), "Leave empty to use the Java runtime running this launcher.");
+                withBrowse(javaField, false),
+                "Leave empty to use the Java each version needs (1.8.9 uses Java 8, 26.3 needs Java 25+).");
         row = addRow(form, row, "Memory (MB)",
                 memoryRow(), "Minimum and maximum heap for the game.");
         row = addRow(form, row, "Window size",
