@@ -39,6 +39,9 @@ public final class MixClientLauncher {
             try {
                 LauncherFrame frame = new LauncherFrame(config, accounts);
                 frame.setVisible(true);
+                // Tells the launcher that installed this build that it came up; without this
+                // the update is rolled back to the build it replaced.
+                Updater.noteStarted();
                 startUpdateCheck(frame, config);
             } catch (RuntimeException e) {
                 logCrash(e);
@@ -52,12 +55,13 @@ public final class MixClientLauncher {
     /**
      * Looks for a newer release in the background. With {@code autoUpdate} on (the default) the
      * release is downloaded, verified and started right away; otherwise the launcher just offers it.
+     * The feed's newest stable build is used; test builds are never installed.
      */
     private static void startUpdateCheck(LauncherFrame frame, LauncherConfig config) {
         Thread thread = new Thread(() -> {
             try {
-                Updater.Release release = Updater.check();
-                if (!Updater.isNewer(release.version(), BuildInfo.VERSION)) {
+                Updater.Release release = Updater.check().orElse(null);
+                if (release == null || !Updater.isNewer(release.version(), BuildInfo.VERSION)) {
                     frame.setUpdateStatus("Up to date · MixClient " + BuildInfo.VERSION);
                     return;
                 }
