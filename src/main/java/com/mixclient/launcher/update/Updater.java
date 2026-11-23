@@ -62,6 +62,13 @@ public final class Updater {
     private static final String START_STAMP = "last-start.json";
     /** How long a freshly installed launcher gets to show its window before it is rolled back. */
     private static final long START_TIMEOUT_MS = 30_000;
+    /**
+     * How long the swap helper waits for the launcher it replaces to close its jar. Windows keeps
+     * the jar of a running process locked, so the old launcher has to be gone before the swap.
+     */
+    private static final long PARENT_EXIT_TIMEOUT_MS = 30_000;
+    /** The helper mode: {@code --apply-update <target jar> <pid of the launcher> <version>}. */
+    public static final String HELPER_FLAG = "--apply-update";
 
     /** The release workflow's test rule, so the launcher and the site agree on what is stable. */
     private static final Pattern TEST_WORDS = Pattern.compile(
@@ -544,16 +551,16 @@ public final class Updater {
     }
 
     /**
-     * Installs {@code release}: opens its installer, or replaces the jar, starts it and watches it
-     * long enough to know it came up. Nothing is installed before its SHA-256 matched.
+     * Installs {@code release}: opens its installer, or downloads the jar and hands it to the swap
+     * helper. Nothing is installed before its SHA-256 matched.
      *
-     * @return true when this process should exit because the new build is already running (or an
-     *         installer was handed over); false when this launcher is still the one in charge, so
-     *         it must keep its window instead of leaving the player with none or with two
+     * @return true when this process should exit: an installer was opened, or the helper is about
+     *         to replace this launcher and start the new one
      */
     public static boolean apply(Release release, Path updatesDir, Consumer<String> status)
             throws IOException {
         Files.createDirectories(updatesDir);
+        pruneHelperCopies(updatesDir);
 
         if (isPackaged() && release.installerUrl() != null) {
             status.accept("Downloading MixClient " + release.version() + " installer…");
@@ -571,32 +578,160 @@ public final class Updater {
         status.accept("Downloading MixClient " + release.version() + "…");
         Path jar = download(release.jarName(), release.jarUrl(),
                 release.jarSha256(), release.checksumUrl(), updatesDir, status);
-        Install install = installJar(jar, status);
-        status.accept("Starting MixClient " + release.version() + "…");
-        Process child = relaunch(install.jar());
-        Start start = awaitStart(child, install, release, status);
-        return start == Start.UP || start == Start.SLOW;
+
+        Path target = BuildInfo.jarPath();
+        if (target == null) {
+            // An IDE or build-directory run has no installed jar to replace.
+            status.accept("Running from a build directory; starting the downloaded launcher.");
+            relaunch(jar);
+            return true;
+        }
+
+        status.accept("Restarting into MixClient " + release.version() + "…");
+        startSwapHelper(jar, target, release.version());
+        return true;
     }
 
     /**
-     * Puts the verified jar where the launcher runs from, so the next start is the new version
-     * too. The previous jar stays beside it as {@code .old} and is the rollback target. When that
-     * location can't be written (a read-only install, an IDE run, a locked file on Windows) the
-     * downloaded copy in the updates folder is started instead, and nothing is replaced.
+     * Starts the verified download in helper mode and leaves the swap to it.
+     *
+     * <p>The helper is a <em>copy of this build</em>, not the download, for two reasons: it is a
+     * different file from the installed jar, so it can already be running while this process exits
+     * and Windows lets go of the jar it was started from, and it is known to run, so a release that
+     * cannot start still gets rolled back instead of leaving the player with nothing.</p>
      */
-    private static Install installJar(Path downloaded, Consumer<String> status) {
+    private static void startSwapHelper(Path downloaded, Path target, String version)
+            throws IOException {
         Path running = BuildInfo.jarPath();
         if (running == null) {
-            status.accept("Running from a build directory; starting the downloaded launcher.");
-            return new Install(downloaded, null);
+            throw new IOException("no running jar to start the update helper from");
         }
+        Path updatesDir = downloaded.getParent();
+        Path helper = updatesDir.resolve("swap-helper-" + ProcessHandle.current().pid() + ".jar");
+        Files.copy(running, helper, StandardCopyOption.REPLACE_EXISTING);
+        new ProcessBuilder(javaCommand(), "-jar", helper.toString(),
+                HELPER_FLAG, downloaded.toString(), target.toString(),
+                Long.toString(ProcessHandle.current().pid()), version)
+                .directory(updatesDir.toFile())
+                .inheritIO()
+                .start();
+    }
+
+    /**
+     * The update helper, running from a scratch copy of the installed build rather than from the
+     * installed jar itself.
+     *
+     * <p>It waits for the launcher that started it to close the installed jar, copies the verified
+     * download over that path, keeps the old one as {@code .old}, starts the installed copy and
+     * watches it the way {@link #apply} used to. This is what makes an update survive on Windows,
+     * where a running jar cannot be moved or overwritten; the installed file is only touched once
+     * no process has it open, and the new build is only opened after the swap succeeded.</p>
+     *
+     * <p>Arguments: {@code --apply-update <new jar> <target jar> <pid of the launcher> <version>}.</p>
+     */
+    public static void runSwapHelper(String[] args) {
+        Path downloaded;
+        Path target;
+        long parentPid;
+        String version;
         try {
-            Path backup = replaceVerified(downloaded, running, status);
-            return new Install(running, backup);
+            downloaded = Path.of(args[1]);
+            target = Path.of(args[2]);
+            parentPid = Long.parseLong(args[3]);
+            version = args.length > 4 ? args[4] : BuildInfo.VERSION;
+        } catch (RuntimeException e) {
+            System.err.println("[update] helper started with bad arguments; giving up");
+            return;
+        }
+
+        Consumer<String> status = message -> System.err.println("[update] " + message);
+        awaitExit(parentPid);
+
+        try {
+            Path backup = replaceWithRetry(downloaded, target, status);
+            Install install = new Install(target, backup);
+            Process child = relaunch(target);
+            Start start = awaitStart(child, install, version, status);
+            status.accept("MixClient " + version + " " + start.name().toLowerCase(Locale.ROOT));
+            if (start == Start.ROLLED_BACK || start == Start.CLOSED) {
+                // The launcher that started this helper is gone, so whatever is installed now has
+                // to be opened here or the player is left with no window at all.
+                relaunchQuietly(target, status);
+            }
         } catch (IOException e) {
-            status.accept("Couldn't replace the launcher (" + e.getMessage()
-                    + "); starting the new copy from the updates folder.");
-            return new Install(downloaded, null);
+            // A read-only install (or a jar still locked after the retries) must not leave the
+            // player with nothing: start what is still installed, which is this build.
+            status.accept("couldn't install " + version + " (" + e.getMessage()
+                    + "); starting the installed copy");
+            relaunchQuietly(target, status);
+        }
+        System.exit(0);
+    }
+
+    /** Waits for {@code pid} to close, then a moment longer for it to release its jar. */
+    private static void awaitExit(long pid) {
+        long deadline = System.currentTimeMillis() + PARENT_EXIT_TIMEOUT_MS;
+        while (System.currentTimeMillis() < deadline) {
+            if (!ProcessHandle.of(pid).map(ProcessHandle::isAlive).orElse(false)) {
+                sleep(300);
+                return;
+            }
+            sleep(100);
+        }
+        System.err.println("[update] the launcher is still open after "
+                + (PARENT_EXIT_TIMEOUT_MS / 1000) + "s; trying the swap anyway");
+    }
+
+    /**
+     * Replaces the installed jar, retrying briefly: Windows can keep the handle for a moment after
+     * the process that owned it has gone. A failed attempt leaves the installed file untouched (or
+     * restored), so trying again is safe.
+     */
+    private static Path replaceWithRetry(Path downloaded, Path target, Consumer<String> status)
+            throws IOException {
+        IOException last = null;
+        for (int attempt = 1; attempt <= 10; attempt++) {
+            try {
+                return replaceVerified(downloaded, target, status);
+            } catch (IOException e) {
+                last = e;
+                status.accept("the installed jar is still busy (" + e.getMessage()
+                        + "); retrying");
+                sleep(300L * attempt);
+            }
+        }
+        throw last != null ? last : new IOException("the launcher could not be replaced");
+    }
+
+    private static void relaunchQuietly(Path jar, Consumer<String> status) {
+        try {
+            relaunch(jar);
+        } catch (IOException e) {
+            status.accept("couldn't start " + jar.getFileName() + ": " + e.getMessage());
+        }
+    }
+
+    /** Removes helper copies left by earlier updates; windows hands them back as they close. */
+    private static void pruneHelperCopies(Path updatesDir) {
+        try (var files = Files.list(updatesDir)) {
+            files.filter(path -> path.getFileName().toString().startsWith("swap-helper-"))
+                    .forEach(path -> {
+                        try {
+                            Files.deleteIfExists(path);
+                        } catch (IOException stillRunning) {
+                            // A helper from a previous update is still up; it goes next time.
+                        }
+                    });
+        } catch (IOException e) {
+            System.err.println("[update] could not tidy " + updatesDir + ": " + e.getMessage());
+        }
+    }
+
+    private static void sleep(long millis) {
+        try {
+            Thread.sleep(millis);
+        } catch (InterruptedException e) {
+            Thread.currentThread().interrupt();
         }
     }
 
@@ -608,11 +743,11 @@ public final class Updater {
      * launcher that is merely slow is left running untouched, because replacing it mid-start would
      * end with two windows. A clean exit is not treated as a failure either.</p>
      */
-    private static Start awaitStart(Process child, Install install, Release release,
+    private static Start awaitStart(Process child, Install install, String version,
                                     Consumer<String> status) {
         long launchedAt = System.currentTimeMillis();
         while (child.isAlive() && System.currentTimeMillis() - launchedAt < START_TIMEOUT_MS) {
-            if (startedSince(launchedAt, release.version())) {
+            if (startedSince(launchedAt, version)) {
                 return Start.UP;
             }
             try {
@@ -622,7 +757,7 @@ public final class Updater {
                 return Start.SLOW;
             }
         }
-        if (startedSince(launchedAt, release.version())) {
+        if (startedSince(launchedAt, version)) {
             return Start.UP;
         }
 
@@ -631,9 +766,9 @@ public final class Updater {
         String kept = canRollBack ? " (previous build kept as " + backup.getFileName() + ")" : "";
 
         if (child.isAlive()) {
-            status.accept("MixClient " + release.version() + " is still starting; leaving it running"
+            status.accept("MixClient " + version + " is still starting; leaving it running"
                     + kept);
-            System.err.println("[update] MixClient " + release.version()
+            System.err.println("[update] MixClient " + version
                     + " has not reported in after " + (START_TIMEOUT_MS / 1000)
                     + "s but is still running; not rolling back");
             return Start.SLOW;
@@ -641,23 +776,23 @@ public final class Updater {
 
         int code = exitCode(child);
         if (code == 0 || !canRollBack) {
-            status.accept("MixClient " + release.version() + " closed before it reported in"
+            status.accept("MixClient " + version + " closed before it reported in"
                     + (code == 0 ? "" : " (exit " + code + ")")
                     + "; you are still on MixClient " + BuildInfo.VERSION);
-            System.err.println("[update] MixClient " + release.version() + " exited with " + code
+            System.err.println("[update] MixClient " + version + " exited with " + code
                     + " before reporting in; nothing was restored");
             return Start.CLOSED;
         }
 
         try {
             Files.copy(backup, install.jar(), StandardCopyOption.REPLACE_EXISTING);
-            status.accept("MixClient " + release.version() + " failed to start (exit " + code
+            status.accept("MixClient " + version + " failed to start (exit " + code
                     + "); still running MixClient " + BuildInfo.VERSION);
-            System.err.println("[update] MixClient " + release.version() + " exited with " + code
+            System.err.println("[update] MixClient " + version + " exited with " + code
                     + "; restored " + backup);
             return Start.ROLLED_BACK;
         } catch (IOException e) {
-            status.accept("MixClient " + release.version() + " failed to start (exit " + code
+            status.accept("MixClient " + version + " failed to start (exit " + code
                     + ") and the rollback failed: " + e.getMessage());
             System.err.println("[update] rollback failed: " + e);
             return Start.CLOSED;
@@ -884,13 +1019,16 @@ public final class Updater {
 
     /** Starts the downloaded launcher jar and leaves this process to the caller. */
     public static Process relaunch(Path jar) throws IOException {
-        String executable = System.getProperty("os.name", "").toLowerCase(Locale.ROOT).contains("win")
-                ? "java.exe" : "java";
-        Path java = Path.of(System.getProperty("java.home"), "bin", executable);
+        Path java = Path.of(System.getProperty("java.home"), "bin", javaCommand());
         return new ProcessBuilder(java.toString(), "-jar", jar.toString())
                 .directory(jar.getParent().toFile())
                 .inheritIO()
                 .start();
+    }
+
+    private static String javaCommand() {
+        return System.getProperty("os.name", "").toLowerCase(Locale.ROOT).contains("win")
+                ? "java.exe" : "java";
     }
 
     private static void open(Path file) throws IOException {

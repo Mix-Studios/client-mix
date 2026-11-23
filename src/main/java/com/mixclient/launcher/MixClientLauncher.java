@@ -26,6 +26,13 @@ public final class MixClientLauncher {
     }
 
     public static void main(String[] args) {
+        // The update helper, started from the downloaded jar so the installed one is not the file
+        // being replaced (Windows keeps a running jar locked). It never opens a window.
+        if (args.length > 0 && Updater.HELPER_FLAG.equals(args[0])) {
+            Updater.runSwapHelper(args);
+            return;
+        }
+
         System.setProperty("apple.awt.application.name", "MixClient");
         installCrashLogHandler();
 
