@@ -21,11 +21,15 @@ name: Release
 # Tags that name a test build (Test, 1.2.0-beta.1, rc1) or that are not a plain
 # version (v1.2.3) are published as GitHub pre-releases. GitHub's "latest" then
 # keeps pointing at the stable build, so a test tag cannot take over the site's
-# download button or /releases/latest.
+# download button or /releases/latest. The site lists pre-releases on its own
+# test-builds page instead.
 
 on:
   push:
-    tags: ["v*"]
+    # Every tag publishes: a plain version (v1.2.3) as a normal release, and any
+    # other tag (Test, v1.2.0-beta.1, nightly-*) as a pre-release, which GitHub's
+    # "latest" and the site's download button both skip.
+    tags: ["**"]
   workflow_dispatch:
 
 permissions:
