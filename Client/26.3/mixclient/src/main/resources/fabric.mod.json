@@ -1,0 +1,28 @@
+{
+  "schemaVersion": 1,
+  "id": "mixclient",
+  "version": "${version}",
+  "name": "MixClient",
+  "description": "MixClient - the Minecraft client half of MixClient, with Discord presence and performance options.",
+  "authors": [
+    "Mix Studios"
+  ],
+  "contact": {
+    "homepage": "https://github.com/Mix-Studios/client-mix",
+    "sources": "https://github.com/Mix-Studios/client-mix"
+  },
+  "license": "LGPL-3.0",
+  "icon": "assets/mixclient/icon.png",
+  "environment": "client",
+  "entrypoints": {
+    "client": [
+      "dev.mixclient.MixClientMod"
+    ]
+  },
+  "depends": {
+    "fabricloader": ">=0.20.1",
+    "minecraft": ">=26.3",
+    "java": ">=25",
+    "fabric-api": "*"
+  }
+}

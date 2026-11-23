@@ -46,3 +46,8 @@ macOS, the MSI on Windows and the DEB on Linux; pass `-PinstallerType=rpm` on Li
 jpackage only builds for the machine it runs on, which is why
 [`.github/workflows/release.yml`](.github/workflows/release.yml) runs one job per platform and
 publishes everything to the release when a `v*` tag is pushed.
+
+## Client source
+
+The Minecraft client lives in [`Client/`](Client/README.md): a Forge 1.8.9 module and a Fabric
+26.3 module, each with its own Gradle build and its own build instructions there.

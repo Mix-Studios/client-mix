@@ -1,0 +1,93 @@
+buildscript {
+    repositories {
+        jcenter()
+        maven {
+            name = "forge"
+            url = "https://files.minecraftforge.net/maven"
+        }
+        maven {
+            name = 'sponge'
+            url = 'https://repo.spongepowered.org/maven'
+        }
+    }
+    dependencies {
+        classpath 'net.minecraftforge.gradle:ForgeGradle:2.1-SNAPSHOT'
+        classpath 'org.spongepowered:mixingradle:0.6-SNAPSHOT'
+    }
+}
+apply plugin: 'net.minecraftforge.gradle.forge'
+apply plugin: 'org.spongepowered.mixin'
+
+compileJava {
+    sourceCompatibility = targetCompatibility = '1.8'
+    options.encoding = 'UTF-8'
+}
+
+version = "1.0"
+group= "dev.cloudmc"
+archivesBaseName = "cloudmc"
+
+minecraft {
+    version = "1.8.9-11.15.1.2318-1.8.9"
+    runDir = "run"
+    mappings = "stable_22"
+}
+
+mixin {
+    defaultObfuscationEnv = "searge"
+    add sourceSets.main, "mixins.cloudmc.refmap.json"
+}
+
+configurations {
+    embed
+    compile.extendsFrom(embed)
+}
+
+repositories {
+    mavenCentral()
+    jcenter()
+    maven {
+        name = 'sponge'
+        url = 'https://repo.spongepowered.org/maven/'
+    }
+}
+
+dependencies {
+    embed('org.spongepowered:mixin:0.7.11-SNAPSHOT')
+
+    // Discord Rich Presence. Java 8 cannot open Discord's IPC socket or named pipe by itself, so
+    // JNA ships the native calls; both jars are shaded into the mod below.
+    embed 'net.java.dev.jna:jna:5.19.1'
+    embed 'net.java.dev.jna:jna-platform:5.19.1'
+}
+
+processResources {
+    inputs.property "version", project.version
+    inputs.property "mcversion", project.minecraft.version
+
+    from(sourceSets.main.resources.srcDirs) {
+        include 'mcmod.info'
+        expand 'version':project.version, 'mcversion':project.minecraft.version
+    }
+
+    from(sourceSets.main.resources.srcDirs) {
+        exclude 'mcmod.info'
+    }
+}
+
+jar {
+    dependsOn configurations.embed
+    // JNA and the mixin jar repeat a few manifest and module entries; one copy of each is enough.
+    duplicatesStrategy = 'exclude'
+    from(configurations.embed.collect { it.isDirectory() ? it : zipTree(it) }) {
+        exclude 'META-INF/*.SF', 'META-INF/*.DSA', 'META-INF/*.RSA'
+        exclude 'META-INF/MANIFEST.MF', 'module-info.class'
+    }
+
+    manifest.attributes (
+            "MixinConfigs": "mixins.cloudmc.json",
+            "TweakClass": "org.spongepowered.asm.launch.MixinTweaker",
+            'FMLCorePluginContainsFMLMod': true,
+            "ForceLoadAsMod": true
+    )
+}
