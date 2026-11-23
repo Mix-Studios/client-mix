@@ -96,15 +96,11 @@ public final class MixClientLauncher {
 
     private static void installUpdate(LauncherFrame frame, Updater.Release release) {
         try {
-            frame.setUpdateStatus("Downloading MixClient " + release.version() + "…");
-            boolean handOver = Updater.apply(release, AppPaths.appDir().resolve("updates"),
-                    frame::setUpdateStatus);
+            Updater.apply(release, AppPaths.appDir().resolve("updates"), frame::setUpdateStatus);
 
-            // Quit only once the new launcher is running (or its installer was opened). After a
-            // rollback this window is the launcher the player keeps, so it must stay open.
-            if (handOver) {
-                SwingUtilities.invokeLater(() -> System.exit(0));
-            }
+            // apply() returns once an installer is open or the swap helper owns the update, so
+            // this window has nothing left to do.
+            SwingUtilities.invokeLater(() -> System.exit(0));
         } catch (Exception e) {
             frame.setUpdateStatus("Update failed: " + e.getMessage());
             System.err.println("[update] " + e);

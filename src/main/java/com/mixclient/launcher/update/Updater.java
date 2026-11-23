@@ -67,7 +67,10 @@ public final class Updater {
      * the jar of a running process locked, so the old launcher has to be gone before the swap.
      */
     private static final long PARENT_EXIT_TIMEOUT_MS = 30_000;
-    /** The helper mode: {@code --apply-update <target jar> <pid of the launcher> <version>}. */
+    /**
+     * The helper mode:
+     * {@code --apply-update <new jar> <installed jar> <pid of the launcher> <version>}.
+     */
     public static final String HELPER_FLAG = "--apply-update";
 
     /** The release workflow's test rule, so the launcher and the site agree on what is stable. */
@@ -90,10 +93,6 @@ public final class Updater {
     public record Release(String tag, String version, String jarName, String jarUrl,
                           String installerName, String installerUrl, String checksumUrl,
                           long size, String jarSha256, String installerSha256) {
-    }
-
-    /** The build that is now installed, and the one it replaced ({@code null} if none). */
-    private record Install(Path jar, Path backup) {
     }
 
     /** Thrown when the feed describes a test build; the stable channel never installs one. */
@@ -538,26 +537,12 @@ public final class Updater {
         return trimmed;
     }
 
-    /** How the freshly installed launcher behaved after it was started. */
-    private enum Start {
-        /** It reported its window, so the new build is the one running. */
-        UP,
-        /** It is still running but has not reported in yet: leave it alone. */
-        SLOW,
-        /** It closed without reporting its window. */
-        CLOSED,
-        /** It exited with an error and the previous build was put back. */
-        ROLLED_BACK
-    }
-
     /**
      * Installs {@code release}: opens its installer, or downloads the jar and hands it to the swap
-     * helper. Nothing is installed before its SHA-256 matched.
-     *
-     * @return true when this process should exit: an installer was opened, or the helper is about
-     *         to replace this launcher and start the new one
+     * helper. Nothing is installed before its SHA-256 matched. Either way the update is no longer
+     * this process's job once this returns, so the caller closes its window.
      */
-    public static boolean apply(Release release, Path updatesDir, Consumer<String> status)
+    public static void apply(Release release, Path updatesDir, Consumer<String> status)
             throws IOException {
         Files.createDirectories(updatesDir);
         pruneHelperCopies(updatesDir);
@@ -568,7 +553,7 @@ public final class Updater {
                     release.installerSha256(), release.checksumUrl(), updatesDir, status);
             status.accept("Opening the " + release.installerName() + " installer…");
             open(installer);
-            return true;
+            return;
         }
 
         if (release.jarUrl() == null) {
@@ -584,12 +569,11 @@ public final class Updater {
             // An IDE or build-directory run has no installed jar to replace.
             status.accept("Running from a build directory; starting the downloaded launcher.");
             relaunch(jar);
-            return true;
+            return;
         }
 
         status.accept("Restarting into MixClient " + release.version() + "…");
         startSwapHelper(jar, target, release.version());
-        return true;
     }
 
     /**
@@ -649,11 +633,7 @@ public final class Updater {
 
         try {
             Path backup = replaceWithRetry(downloaded, target, status);
-            Install install = new Install(target, backup);
-            Process child = relaunch(target);
-            Start start = awaitStart(child, install, version, status);
-            status.accept("MixClient " + version + " " + start.name().toLowerCase(Locale.ROOT));
-            if (start == Start.ROLLED_BACK || start == Start.CLOSED) {
+            if (!awaitStart(relaunch(target), target, backup, version, status)) {
                 // The launcher that started this helper is gone, so whatever is installed now has
                 // to be opened here or the player is left with no window at all.
                 relaunchQuietly(target, status);
@@ -742,61 +722,57 @@ public final class Updater {
      * <p>The previous build is only put back when the new one <em>exited with an error</em>: a
      * launcher that is merely slow is left running untouched, because replacing it mid-start would
      * end with two windows. A clean exit is not treated as a failure either.</p>
+     *
+     * @return true while a launcher is running or on its way; false when nothing is on screen and
+     *         the caller has to open what is installed
      */
-    private static Start awaitStart(Process child, Install install, String version,
-                                    Consumer<String> status) {
+    private static boolean awaitStart(Process child, Path target, Path backup, String version,
+                                      Consumer<String> status) {
         long launchedAt = System.currentTimeMillis();
         while (child.isAlive() && System.currentTimeMillis() - launchedAt < START_TIMEOUT_MS) {
             if (startedSince(launchedAt, version)) {
-                return Start.UP;
+                return true;
             }
             try {
                 Thread.sleep(250);
             } catch (InterruptedException e) {
                 Thread.currentThread().interrupt();
-                return Start.SLOW;
+                return true;
             }
         }
         if (startedSince(launchedAt, version)) {
-            return Start.UP;
+            return true;
         }
-
-        Path backup = install.backup();
-        boolean canRollBack = backup != null && Files.exists(backup);
-        String kept = canRollBack ? " (previous build kept as " + backup.getFileName() + ")" : "";
 
         if (child.isAlive()) {
             status.accept("MixClient " + version + " is still starting; leaving it running"
-                    + kept);
+                    + " (previous build kept as " + backup.getFileName() + ")");
             System.err.println("[update] MixClient " + version
                     + " has not reported in after " + (START_TIMEOUT_MS / 1000)
                     + "s but is still running; not rolling back");
-            return Start.SLOW;
+            return true;
         }
 
         int code = exitCode(child);
-        if (code == 0 || !canRollBack) {
-            status.accept("MixClient " + version + " closed before it reported in"
-                    + (code == 0 ? "" : " (exit " + code + ")")
-                    + "; you are still on MixClient " + BuildInfo.VERSION);
-            System.err.println("[update] MixClient " + version + " exited with " + code
-                    + " before reporting in; nothing was restored");
-            return Start.CLOSED;
+        if (code == 0) {
+            status.accept("MixClient " + version + " closed before it reported in; opening it again");
+            System.err.println("[update] MixClient " + version
+                    + " exited with 0 before reporting in; nothing was restored");
+            return false;
         }
 
         try {
-            Files.copy(backup, install.jar(), StandardCopyOption.REPLACE_EXISTING);
+            Files.copy(backup, target, StandardCopyOption.REPLACE_EXISTING);
             status.accept("MixClient " + version + " failed to start (exit " + code
-                    + "); still running MixClient " + BuildInfo.VERSION);
+                    + "); restored the previous build");
             System.err.println("[update] MixClient " + version + " exited with " + code
                     + "; restored " + backup);
-            return Start.ROLLED_BACK;
         } catch (IOException e) {
             status.accept("MixClient " + version + " failed to start (exit " + code
                     + ") and the rollback failed: " + e.getMessage());
             System.err.println("[update] rollback failed: " + e);
-            return Start.CLOSED;
         }
+        return false;
     }
 
     /** The child's exit status; -1 if it is somehow still running. */
