@@ -14,12 +14,15 @@ import com.mixclient.launcher.game.JavaRuntime;
 import com.mixclient.launcher.game.LoaderInstaller;
 import com.mixclient.launcher.game.MojangApi;
 import com.mixclient.launcher.game.PreparedInstall;
+import com.mixclient.launcher.game.VersionResolver;
+import com.google.gson.JsonObject;
 
 import javax.swing.Box;
 import javax.swing.BoxLayout;
 import javax.swing.JButton;
 import javax.swing.JComboBox;
 import javax.swing.JComponent;
+import javax.swing.JFileChooser;
 import javax.swing.JLabel;
 import javax.swing.JMenuItem;
 import javax.swing.JOptionPane;
@@ -65,11 +68,15 @@ public final class HomePanel extends JPanel {
     private final JButton signOutButton = Theme.secondaryButton("Sign out");
     private final JComboBox<String> versionBox = new JComboBox<>();
     private final JButton refreshVersions = Theme.secondaryButton("Refresh");
+    private final JLabel javaLabel = new JLabel(" ");
+    private final JButton javaButton = Theme.secondaryButton("Java…");
     private final JButton playButton = Theme.primaryButton("PLAY");
     private final JProgressBar progressBar = new JProgressBar(0, 1000);
     private final JLabel statusLabel = new JLabel(" ");
 
     private volatile boolean busy;
+    /** True while the version list is being replaced, so its events do not start Java lookups. */
+    private boolean loadingVersions;
 
     public HomePanel(Window owner, LauncherConfig config, Accounts accounts, LogPanel logPanel) {
         super();
@@ -99,6 +106,8 @@ public final class HomePanel extends JPanel {
         add(sectionLabel("VERSION"));
         add(Box.createVerticalStrut(3));
         add(versionRow());
+        add(Box.createVerticalStrut(4));
+        add(javaRow());
         add(Box.createVerticalStrut(12));
 
         playButton.setAlignmentX(LEFT_ALIGNMENT);
@@ -212,6 +221,11 @@ public final class HomePanel extends JPanel {
         row.setLayout(new BoxLayout(row, BoxLayout.X_AXIS));
 
         Theme.styleCombo(versionBox);
+        versionBox.addActionListener(e -> {
+            if (!loadingVersions) {
+                refreshJava();
+            }
+        });
         versionBox.setPreferredSize(new Dimension(180, 22));
         versionBox.setMaximumSize(new Dimension(180, 22));
         versionBox.setMinimumSize(new Dimension(120, 22));
@@ -223,6 +237,27 @@ public final class HomePanel extends JPanel {
         row.add(refreshVersions);
         row.add(Box.createHorizontalGlue());
         row.setMaximumSize(new Dimension(Integer.MAX_VALUE, 24));
+        row.setAlignmentX(LEFT_ALIGNMENT);
+        return row;
+    }
+
+    /** The Java line under the version picker, plus the per-version picker. */
+    private JComponent javaRow() {
+        JPanel row = new JPanel();
+        row.setOpaque(false);
+        row.setLayout(new BoxLayout(row, BoxLayout.X_AXIS));
+
+        Theme.styleLabel(javaLabel, Theme.SMALL_FONT, Theme.MUTED);
+        javaButton.setFont(Theme.SMALL_FONT);
+        javaButton.setPreferredSize(new Dimension(64, 20));
+        javaButton.setMaximumSize(new Dimension(64, 20));
+        javaButton.addActionListener(e -> showJavaMenu());
+
+        row.add(javaLabel);
+        row.add(Box.createHorizontalStrut(6));
+        row.add(javaButton);
+        row.add(Box.createHorizontalGlue());
+        row.setMaximumSize(new Dimension(Integer.MAX_VALUE, 22));
         row.setAlignmentX(LEFT_ALIGNMENT);
         return row;
     }
@@ -371,13 +406,15 @@ public final class HomePanel extends JPanel {
 
                 // Java is chosen per version (1.8.9 needs an Intel Java 8, 26.3 needs 25+); a
                 // missing runtime fails here with an actionable message instead of exit code 1.
-                JavaRuntime.Match java = JavaRuntime.resolve(install.versionId(),
-                        install.requiredJavaMajor(), config);
+                String javaOverride = config.javaFor(versionId);
+                JavaRuntime.Match java = JavaRuntime.resolve(versionId,
+                        install.requiredJavaMajor(), javaOverride);
                 logPanel.append("[java] " + loader.versionId() + " needs Java " + install.requiredJavaMajor()
-                        + "+; using Java " + java.major() + " (" + java.arch() + "): " + java.java());
+                        + "+; using Java " + java.major() + " (" + java.arch() + "): " + java.java()
+                        + (javaOverride.isBlank() ? "" : " (set for " + versionId + ")"));
 
                 SwingUtilities.invokeLater(() -> updateStatus("Starting Minecraft…", 1.0));
-                GameLauncher.start(install, session, config, logPanel::append,
+                GameLauncher.start(install, session, config, java.java(), logPanel::append,
                         code -> SwingUtilities.invokeLater(() -> onGameExit(code)));
 
                 logPanel.append("[launch] Minecraft started as " + session.username()
@@ -448,6 +485,126 @@ public final class HomePanel extends JPanel {
                 ? AppPaths.gameDir() : Path.of(config.gameDir.trim());
     }
 
+    // ---------------------------------------------------------------- java
+
+    /**
+     * Shows the Java the selected version will start with, before Play is pressed. Resolution runs
+     * off the UI thread because it may probe several JVMs and read the version metadata.
+     */
+    private void refreshJava() {
+        String versionId = selectedVersion();
+        if (versionId == null || versionId.isBlank()) {
+            javaLabel.setText(" ");
+            javaButton.setEnabled(false);
+            return;
+        }
+        javaButton.setEnabled(true);
+        javaLabel.setText("Checking Java…");
+        javaLabel.setForeground(Theme.MUTED);
+        javaLabel.setToolTipText(null);
+
+        executor.submit(() -> {
+            String text;
+            String tip;
+            Color color = Theme.MUTED;
+            int required = 8;
+            try {
+                required = requiredJavaMajor(versionId);
+                String override = config.javaFor(versionId);
+                JavaRuntime.Match match = JavaRuntime.resolve(versionId, required, override);
+                text = JavaRuntime.describe(match, override);
+                tip = match.java().toString()
+                        + (override.isBlank() ? " (chosen automatically)" : " (set for " + versionId + ")");
+                if (match.major() < required) {
+                    text = "Java " + match.major() + " (" + match.arch() + ") — needs " + required + "+";
+                    color = Theme.ERROR;
+                }
+            } catch (JavaRuntime.MissingJavaException e) {
+                text = "No Java " + required + "+ found — pick one with Java…";
+                tip = e.getMessage();
+                color = Theme.ERROR;
+            } catch (Exception e) {
+                text = "Java unknown";
+                tip = e.getMessage() == null ? e.toString() : e.getMessage();
+            }
+
+            String shown = text;
+            String tooltip = tip;
+            Color shade = color;
+            SwingUtilities.invokeLater(() -> {
+                if (!versionId.equals(selectedVersion())) {
+                    return;
+                }
+                javaLabel.setText(shown);
+                javaLabel.setForeground(shade);
+                javaLabel.setToolTipText(tooltip);
+            });
+        });
+    }
+
+    /** The Java the version itself asks for; versions before 1.8.9's metadata default to 8. */
+    private int requiredJavaMajor(String versionId) throws IOException {
+        VersionResolver.Resolved resolved = VersionResolver.resolve(
+                new MojangApi(AppPaths.cacheDir()), gameDir(), versionId, (message, fraction) -> { });
+        JsonObject javaVersion = resolved.json().getAsJsonObject("javaVersion");
+        return javaVersion != null && javaVersion.has("majorVersion")
+                ? javaVersion.get("majorVersion").getAsInt() : 8;
+    }
+
+    private void showJavaMenu() {
+        String versionId = selectedVersion();
+        if (versionId == null || versionId.isBlank()) {
+            return;
+        }
+        String current = config.javaFor(versionId);
+
+        JPopupMenu menu = new JPopupMenu();
+        JMenuItem choose = new JMenuItem(current.isBlank() ? "Choose Java…" : "Change Java…");
+        choose.addActionListener(e -> chooseJava(versionId));
+        menu.add(choose);
+
+        JMenuItem automatic = new JMenuItem("Use automatic Java");
+        automatic.setEnabled(!current.isBlank());
+        automatic.addActionListener(e -> setJavaOverride(versionId, ""));
+        menu.add(automatic);
+
+        if (!current.isBlank()) {
+            menu.addSeparator();
+            JMenuItem shown = new JMenuItem(current);
+            shown.setEnabled(false);
+            menu.add(shown);
+        }
+        menu.show(javaButton, 0, javaButton.getHeight());
+    }
+
+    private void chooseJava(String versionId) {
+        JFileChooser chooser = new JFileChooser();
+        chooser.setFileSelectionMode(JFileChooser.FILES_ONLY);
+        chooser.setDialogTitle("Java executable for " + versionId);
+        String current = config.javaFor(versionId);
+        if (!current.isBlank()) {
+            Path parent = Path.of(current).getParent();
+            if (parent != null && Files.isDirectory(parent)) {
+                chooser.setCurrentDirectory(parent.toFile());
+            }
+        }
+        if (chooser.showOpenDialog(this) == JFileChooser.APPROVE_OPTION) {
+            setJavaOverride(versionId, chooser.getSelectedFile().getAbsolutePath());
+        }
+    }
+
+    private void setJavaOverride(String versionId, String path) {
+        if (path == null || path.isBlank()) {
+            config.javaPaths.remove(versionId);
+        } else {
+            config.javaPaths.put(versionId, path.trim());
+        }
+        config.save();
+        logPanel.append("[java] " + versionId
+                + (path == null || path.isBlank() ? " uses automatic Java" : " now uses " + path.trim()));
+        refreshJava();
+    }
+
     // -------------------------------------------------------------- versions
 
     private void loadVersions() {
@@ -492,6 +649,7 @@ public final class HomePanel extends JPanel {
 
             final String fallback = latestRelease;
             SwingUtilities.invokeLater(() -> {
+                loadingVersions = true;
                 versionBox.removeAllItems();
                 for (String id : ids) {
                     versionBox.addItem(id);
@@ -501,10 +659,12 @@ public final class HomePanel extends JPanel {
                 if (wanted != null) {
                     versionBox.setSelectedItem(wanted);
                 }
+                loadingVersions = false;
                 if (versionBox.getItemCount() == 0) {
                     statusLabel.setText("No Minecraft versions found yet — check your connection.");
                 }
                 refreshVersions.setEnabled(true);
+                refreshJava();
             });
         });
     }

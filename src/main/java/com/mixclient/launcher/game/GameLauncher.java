@@ -14,12 +14,10 @@ import java.io.IOException;
 import java.io.InputStream;
 import java.io.InputStreamReader;
 import java.nio.charset.StandardCharsets;
-import java.nio.file.Files;
 import java.nio.file.Path;
 import java.util.ArrayList;
 import java.util.LinkedHashMap;
 import java.util.List;
-import java.util.Locale;
 import java.util.Map;
 import java.util.function.Consumer;
 
@@ -40,8 +38,9 @@ public final class GameLauncher {
     }
 
     public static Process start(PreparedInstall install, PlayerSession session, LauncherConfig config,
-                                Consumer<String> logSink, Consumer<Integer> onExit) throws IOException {
-        List<String> command = buildCommand(install, session, config);
+                                Path javaExecutable, Consumer<String> logSink,
+                                Consumer<Integer> onExit) throws IOException {
+        List<String> command = buildCommand(install, session, config, javaExecutable);
         logSink.accept(Redact.line("$ " + String.join(" ", Redact.command(command))));
 
         ProcessBuilder builder = new ProcessBuilder(command)
@@ -71,7 +70,8 @@ public final class GameLauncher {
 
     /** Visible for diagnostics and for tests: the exact command used to start the game. */
     public static List<String> buildCommand(PreparedInstall install, PlayerSession session,
-                                            LauncherConfig config) throws IOException {
+                                            LauncherConfig config, Path javaExecutable)
+            throws IOException {
         JsonObject meta = install.meta();
         Map<String, Boolean> features = VersionResolver.defaultFeatures();
 
@@ -79,9 +79,9 @@ public final class GameLauncher {
         Map<String, String> vars = placeholders(install, session, classpath, config);
 
         List<String> command = new ArrayList<>();
-        // Each version gets the Java it was built for: 1.8.9 wants an Intel Java 8, 26.3 needs 25+.
-        command.add(JavaRuntime.forVersion(install.versionId(), install.requiredJavaMajor(), config)
-                .toString());
+        // The caller picks the Java per version (1.8.9 wants an Intel Java 8, 26.3 needs 25+), so
+        // what the Play screen showed is exactly what starts the game.
+        command.add(javaExecutable.toString());
         command.add("-Xms" + config.minMemoryMb + "M");
         command.add("-Xmx" + config.maxMemoryMb + "M");
         command.addAll(splitArguments(config.jvmArgs));
@@ -201,16 +201,6 @@ public final class GameLauncher {
         }
         JsonObject client = logging.getAsJsonObject("client");
         return client.has("argument") ? client.get("argument").getAsString() : null;
-    }
-
-    public static Path javaExecutable(LauncherConfig config) {
-        if (config.javaPath != null && !config.javaPath.isBlank()) {
-            return Path.of(config.javaPath.trim());
-        }
-        String executable = System.getProperty("os.name", "").toLowerCase(Locale.ROOT).contains("win")
-                ? "java.exe" : "java";
-        Path bundled = Path.of(System.getProperty("java.home"), "bin", executable);
-        return Files.exists(bundled) ? bundled : Path.of("java");
     }
 
     private static String expand(String value, Map<String, String> vars) {

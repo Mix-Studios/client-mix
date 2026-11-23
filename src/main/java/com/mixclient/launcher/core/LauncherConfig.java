@@ -9,6 +9,8 @@ import java.nio.charset.StandardCharsets;
 import java.nio.file.Files;
 import java.nio.file.Path;
 import java.nio.file.StandardCopyOption;
+import java.util.LinkedHashMap;
+import java.util.Map;
 
 /** Launcher settings, persisted next to {@code accounts.json}. */
 public final class LauncherConfig {
@@ -37,7 +39,13 @@ public final class LauncherConfig {
 
     /** Game directory; empty means {@link AppPaths#gameDir()}. */
     public String gameDir = "";
-    /** Java executable used for the game; empty means the JVM running the launcher. */
+    /**
+     * Java executable per Minecraft version, e.g. {"1.8.9": "/path/to/bin/java"}. A version
+     * without an entry uses the Java it needs, picked from the runtimes installed on this machine.
+     * These are per version on purpose: pointing 1.8.9 at Java 8 must not affect 26.3.
+     */
+    public Map<String, String> javaPaths = new LinkedHashMap<>();
+    /** The old single override; moved into {@link #javaPaths} when a config is loaded. */
     public String javaPath = "";
     public int maxMemoryMb = 4096;
     public int minMemoryMb = 1024;
@@ -100,7 +108,27 @@ public final class LauncherConfig {
         if (lastAccountId == null) {
             lastAccountId = "";
         }
+        if (javaPaths == null) {
+            javaPaths = new LinkedHashMap<>();
+        }
+        if (javaPath != null && !javaPath.isBlank()) {
+            // A single global override was almost always set for 1.8.9 (26.3 needs a newer Java),
+            // so move it to that version instead of carrying it over to every version.
+            String version = selectedVersion == null || selectedVersion.isBlank()
+                    ? "1.8.9" : selectedVersion;
+            javaPaths.putIfAbsent(version, javaPath.trim());
+            javaPath = "";
+        }
         return this;
+    }
+
+    /** The Java {@code versionId} should start with; empty means pick the right one automatically. */
+    public String javaFor(String versionId) {
+        if (javaPaths == null || versionId == null) {
+            return "";
+        }
+        String path = javaPaths.get(versionId);
+        return path == null ? "" : path.trim();
     }
 
     public void save() {

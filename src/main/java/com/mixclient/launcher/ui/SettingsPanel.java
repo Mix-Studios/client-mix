@@ -23,14 +23,13 @@ import java.awt.Insets;
 import java.nio.file.Path;
 import java.util.function.Consumer;
 
-/** Launcher settings: where the game lives, which Java runs it, and how much memory it gets. */
+/** Launcher settings: where the game lives and how much memory the game gets. */
 public final class SettingsPanel extends JPanel {
 
     private final LauncherConfig config;
     private final Consumer<LauncherConfig> onSaved;
 
     private final JTextField gameDirField = new JTextField();
-    private final JTextField javaField = new JTextField();
     private final JSpinner maxMemory = new JSpinner(new SpinnerNumberModel(4096, 1024, 65536, 512));
     private final JSpinner minMemory = new JSpinner(new SpinnerNumberModel(1024, 512, 32768, 512));
     private final JSpinner width = new JSpinner(new SpinnerNumberModel(1280, 640, 7680, 10));
@@ -58,16 +57,15 @@ public final class SettingsPanel extends JPanel {
         form.setOpaque(false);
 
         gameDirField.setFont(Theme.TEXT_FONT);
-        javaField.setFont(Theme.TEXT_FONT);
         jvmArgs.setFont(Theme.MONO_FONT);
         jvmArgs.setLineWrap(true);
 
         int row = 0;
         row = addRow(form, row, "Game directory",
                 withBrowse(gameDirField, true), null);
-        row = addRow(form, row, "Java executable",
-                withBrowse(javaField, false),
-                "Leave empty to use the Java each version needs (1.8.9 uses Java 8, 26.3 needs Java 25+).");
+        row = addRow(form, row, "Java",
+                hint("Chosen per version on the Play tab; each version shows the Java it will use."),
+                null);
         row = addRow(form, row, "Memory (MB)",
                 memoryRow(), "Minimum and maximum heap for the game.");
         row = addRow(form, row, "Window size",
@@ -124,6 +122,12 @@ public final class SettingsPanel extends JPanel {
         });
         panel.add(browse, BorderLayout.EAST);
         return panel;
+    }
+
+    private JLabel hint(String text) {
+        JLabel label = new JLabel(text);
+        Theme.styleLabel(label, Theme.SMALL_FONT, Theme.MUTED);
+        return label;
     }
 
     private JPanel memoryRow() {
@@ -205,7 +209,6 @@ public final class SettingsPanel extends JPanel {
     private void loadValues() {
         gameDirField.setText(config.gameDir == null ? "" : config.gameDir);
         gameDirField.setToolTipText("Empty means " + AppPaths.gameDir());
-        javaField.setText(config.javaPath == null ? "" : config.javaPath);
         maxMemory.setValue(config.maxMemoryMb);
         minMemory.setValue(config.minMemoryMb);
         width.setValue(config.windowWidth);
@@ -219,7 +222,6 @@ public final class SettingsPanel extends JPanel {
 
     private void save() {
         config.gameDir = gameDirField.getText().trim();
-        config.javaPath = javaField.getText().trim();
         config.maxMemoryMb = (Integer) maxMemory.getValue();
         config.minMemoryMb = (Integer) minMemory.getValue();
         config.windowWidth = (Integer) width.getValue();

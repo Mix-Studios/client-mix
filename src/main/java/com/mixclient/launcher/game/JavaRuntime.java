@@ -1,7 +1,5 @@
 package com.mixclient.launcher.game;
 
-import com.mixclient.launcher.core.LauncherConfig;
-
 import java.io.IOException;
 import java.io.InputStream;
 import java.nio.charset.StandardCharsets;
@@ -64,26 +62,27 @@ public final class JavaRuntime {
      *
      * @param versionId      for the error message, e.g. {@code 1.8.9}
      * @param requiredMajor  the version's {@code javaVersion.majorVersion}
+     * @param javaOverride   the player's Java for this version, or empty/blank to choose one
      */
-    public static Match resolve(String versionId, int requiredMajor, LauncherConfig config)
+    public static Match resolve(String versionId, int requiredMajor, String javaOverride)
             throws MissingJavaException {
-        String explicit = config == null ? null : config.javaPath;
-        if (explicit != null && !explicit.isBlank()) {
+        String explicit = javaOverride == null ? null : javaOverride.trim();
+        if (explicit != null && !explicit.isEmpty()) {
             Match match = probe(Path.of(explicit.trim()));
             if (match == null) {
-                throw new MissingJavaException("The Java set in Settings (" + explicit.trim()
-                        + ") can't be started. Point it at a bin/java binary, or clear it to let"
-                        + " MixClient pick the right Java for each version.");
+                throw new MissingJavaException("The Java set for " + versionId + " (" + explicit
+                        + ") can't be started. Point it at a bin/java binary, or choose automatic.");
             }
             return match;
         }
         return choose(versionId, requiredMajor);
     }
 
-    /** Convenience for the launcher command line. */
-    public static Path forVersion(String versionId, int requiredMajor, LauncherConfig config)
-            throws IOException {
-        return resolve(versionId, requiredMajor, config).java();
+    /** A short "Java 8 (x86_64), automatic" line for the launcher to show before Play. */
+    public static String describe(Match match, String javaOverride) {
+        boolean fixed = javaOverride != null && !javaOverride.isBlank();
+        return "Java " + match.major() + " (" + match.arch() + ")"
+                + (fixed ? ", set for this version" : ", automatic");
     }
 
     private static Match choose(String versionId, int requiredMajor) throws MissingJavaException {
