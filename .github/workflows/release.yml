@@ -65,7 +65,9 @@ jobs:
         run: |
           set -euo pipefail
           chmod +x gradlew
-          ./gradlew --no-daemon build
+          # The jar declares this version in fabric.mod.json, and the launcher refuses a
+          # client that is not its own version.
+          ./gradlew --no-daemon build -PclientVersion="${VERSION#v}"
 
       - name: Keep the client jar in the run
         uses: actions/upload-artifact@v4

@@ -3,7 +3,9 @@ plugins {
     id 'maven-publish'
 }
 
-version = project.mod_version
+// A release passes the tag's version, so the jar announces the same client version as the
+// launcher that bundles it; the property keeps a plain local build on mod_version.
+version = findProperty('clientVersion') ?: project.mod_version
 group = project.maven_group
 
 base {
