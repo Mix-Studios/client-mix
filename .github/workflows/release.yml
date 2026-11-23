@@ -12,6 +12,11 @@ name: Release
 #
 # checksums.txt must stay in `sha256sum` form ("<hash>  <file>") because the
 # download page at Mix-Studios/Mix-Client parses it to show the hash.
+#
+# latest.json is the machine-readable update feed the launcher reads at startup:
+# version, pre-release flag, and one entry per file with platform, arch, format,
+# size, SHA-256 and download URL. It is uploaded next to checksums.txt and is
+# deliberately not listed inside checksums.txt.
 
 on:
   push:
@@ -213,8 +218,102 @@ jobs:
         working-directory: dist
         run: |
           set -euo pipefail
-          sha256sum * > checksums.txt
+          # Build files only: checksums.txt never lists itself, and latest.json is
+          # metadata written afterwards.
+          : > checksums.txt
+          for file in *; do
+            # Skip checksums.txt itself and macOS metadata (._*) files.
+            case "$file" in
+              checksums.txt|._*) continue ;;
+            esac
+            if [ -f "$file" ]; then
+              sha256sum "$file" >> checksums.txt
+            fi
+          done
+          LC_ALL=C sort -o checksums.txt checksums.txt
           cat checksums.txt
+
+      - name: Write latest.json
+        working-directory: dist
+        env:
+          TAG: ${{ github.ref_name }}
+          REPO: ${{ github.repository }}
+        run: |
+          set -euo pipefail
+          python3 - <<'PY'
+          import hashlib
+          import json
+          import os
+          import re
+          import time
+
+          tag = os.environ["TAG"]
+          repo = os.environ["REPO"]
+
+          # format -> (platform, arch); the arch is refined from the file name.
+          FORMATS = {
+              ".msi": ("windows", "x64"),
+              ".dmg": ("macos", None),
+              ".deb": ("linux", "x64"),
+              ".rpm": ("linux", "x64"),
+              ".jar": ("any", "any"),
+          }
+
+          def sha256(path):
+              digest = hashlib.sha256()
+              with open(path, "rb") as handle:
+                  for chunk in iter(lambda: handle.read(1024 * 1024), b""):
+                      digest.update(chunk)
+              return digest.hexdigest()
+
+          files = []
+          for name in sorted(os.listdir(".")):
+              if not os.path.isfile(name) or name in {"checksums.txt", "latest.json"}:
+                  continue
+              if name.startswith("._"):
+                  continue
+              ext = os.path.splitext(name)[1].lower()
+              if ext not in FORMATS:
+                  continue
+
+              platform, arch = FORMATS[ext]
+              if arch is None:
+                  if re.search(r"arm64|aarch64", name, re.I):
+                      arch = "arm64"
+                  elif re.search(r"x64|x86_64|amd64", name, re.I):
+                      arch = "x64"
+                  else:
+                      arch = "any"
+
+              files.append({
+                  "name": name,
+                  "platform": platform,
+                  "arch": arch,
+                  "format": ext.lstrip("."),
+                  "installer": ext != ".jar",
+                  "size": os.path.getsize(name),
+                  "sha256": sha256(name),
+                  "url": f"https://github.com/{repo}/releases/download/{tag}/{name}",
+              })
+
+          latest = {
+              "schema": 1,
+              "version": tag,
+              "version_number": tag.lstrip("vV"),
+              "name": f"Mix Client {tag}",
+              "published_at": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
+              "prerelease": bool(re.search(r"test|beta|alpha|preview|snapshot|nightly|canary|\brc\d*\b", tag, re.I)),
+              "release_url": f"https://github.com/{repo}/releases/tag/{tag}",
+              "checksums_url": f"https://github.com/{repo}/releases/download/{tag}/checksums.txt",
+              "files": files,
+          }
+
+          with open("latest.json", "w", encoding="utf-8") as handle:
+              json.dump(latest, handle, indent=2)
+              handle.write("\n")
+
+          print(json.dumps(latest, indent=2))
+          PY
 
       - name: Attest build provenance
         uses: actions/attest-build-provenance@v4
@@ -239,6 +338,10 @@ jobs:
             echo '```'
             cat dist/checksums.txt
             echo '```'
+            echo
+            echo "**Machine-readable**"
+            echo
+            echo "\`latest.json\` lists the version and every file with its platform, size and SHA-256, so the launcher can check for its own update."
             echo
             echo "**Verify**"
             echo
