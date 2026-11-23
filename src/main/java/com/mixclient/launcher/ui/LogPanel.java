@@ -1,6 +1,7 @@
 package com.mixclient.launcher.ui;
 
 import com.mixclient.launcher.core.AppPaths;
+import com.mixclient.launcher.core.Redact;
 
 import javax.swing.Box;
 import javax.swing.BoxLayout;
@@ -79,8 +80,11 @@ public final class LogPanel extends JPanel {
         if (line == null) {
             return;
         }
+        // Last line of defence: nothing with a token reaches the panel that gets copied into a
+        // support thread, whichever code path produced it.
+        String safe = Redact.line(line);
         SwingUtilities.invokeLater(() -> {
-            area.append("[" + LocalTime.now().format(TIME) + "] " + line + "\n");
+            area.append("[" + LocalTime.now().format(TIME) + "] " + safe + "\n");
             int length = area.getDocument().getLength();
             if (length > MAX_CHARACTERS) {
                 area.replaceRange("", 0, length - MAX_CHARACTERS);

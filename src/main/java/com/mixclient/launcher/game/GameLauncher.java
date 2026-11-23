@@ -6,6 +6,7 @@ import com.google.gson.JsonObject;
 import com.mixclient.launcher.auth.PlayerSession;
 import com.mixclient.launcher.core.BuildInfo;
 import com.mixclient.launcher.core.LauncherConfig;
+import com.mixclient.launcher.core.Redact;
 
 import java.io.BufferedReader;
 import java.io.File;
@@ -41,7 +42,7 @@ public final class GameLauncher {
     public static Process start(PreparedInstall install, PlayerSession session, LauncherConfig config,
                                 Consumer<String> logSink, Consumer<Integer> onExit) throws IOException {
         List<String> command = buildCommand(install, session, config);
-        logSink.accept("$ " + String.join(" ", command));
+        logSink.accept(Redact.line("$ " + String.join(" ", Redact.command(command))));
 
         ProcessBuilder builder = new ProcessBuilder(command)
                 .directory(install.gameDir().toFile())
@@ -54,7 +55,8 @@ public final class GameLauncher {
                          new InputStreamReader(in, StandardCharsets.UTF_8))) {
                 String line;
                 while ((line = reader.readLine()) != null) {
-                    logSink.accept(line);
+                    // The game logs its session id, and players paste this output into reports.
+                    logSink.accept(Redact.line(line));
                 }
             } catch (IOException ignored) {
                 // The process closing its streams is normal on exit.

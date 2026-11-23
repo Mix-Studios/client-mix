@@ -4,6 +4,7 @@ import com.mixclient.launcher.auth.Accounts;
 import com.mixclient.launcher.core.AppPaths;
 import com.mixclient.launcher.core.BuildInfo;
 import com.mixclient.launcher.core.LauncherConfig;
+import com.mixclient.launcher.core.Redact;
 import com.mixclient.launcher.ui.LauncherFrame;
 import com.mixclient.launcher.ui.Theme;
 import com.mixclient.launcher.update.Updater;
@@ -114,7 +115,8 @@ public final class MixClientLauncher {
             Path log = AppPaths.logFile();
             Files.createDirectories(AppPaths.appDir());
             Files.writeString(log,
-                    "[" + LocalDateTime.now() + "] " + writer + System.lineSeparator(),
+                    "[" + LocalDateTime.now() + "] " + Redact.line(writer.toString())
+                            + System.lineSeparator(),
                     StandardCharsets.UTF_8,
                     StandardOpenOption.CREATE, StandardOpenOption.APPEND);
         } catch (Exception ignored) {
