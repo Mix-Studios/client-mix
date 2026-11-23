@@ -1,0 +1,119 @@
+name: Release
+
+# One job, no secrets and no signing keys: build the jar, publish a
+# checksums.txt next to it, and let GitHub attest what this workflow produced.
+#
+# checksums.txt must stay in `sha256sum` form ("<hash>  <file>") because the
+# download page at Mix-Studios/Mix-Client parses it to show the hash.
+
+on:
+  push:
+    tags: ["v*"]
+  workflow_dispatch:
+
+permissions:
+  contents: write
+  id-token: write
+  attestations: write
+
+concurrency:
+  group: release-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  build:
+    name: Build and attest
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check out
+        uses: actions/checkout@v4
+
+      - name: Set up Java 17
+        if: hashFiles('gradlew') != ''
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: "17"
+
+      - name: Build the runnable jar
+        if: hashFiles('gradlew') != ''
+        run: |
+          set -euo pipefail
+          chmod +x gradlew
+          ./gradlew --no-daemon fatJar
+
+      - name: Collect jars into dist/
+        run: |
+          set -euo pipefail
+          mkdir -p dist
+          found=0
+          if [ -d build/libs ]; then
+            while IFS= read -r jar; do
+              case "$jar" in
+                *-sources.jar | *-javadoc.jar) continue ;;
+              esac
+              cp "$jar" dist/
+              found=1
+            done < <(find build/libs -maxdepth 1 -type f -name '*.jar')
+          fi
+          if [ "$found" -eq 0 ]; then
+            while IFS= read -r jar; do
+              cp "$jar" dist/
+              found=1
+            done < <(find . -maxdepth 1 -type f -name '*.jar')
+          fi
+          if [ "$found" -eq 0 ]; then
+            echo "Nothing to release: build/libs/ is empty and no jar sits at the repo root." >&2
+            exit 1
+          fi
+          ls -l dist
+
+      - name: Write checksums.txt
+        working-directory: dist
+        run: |
+          set -euo pipefail
+          for f in *.jar; do sha256sum "$f"; done > checksums.txt
+          cat checksums.txt
+
+      - name: Attest build provenance
+        uses: actions/attest-build-provenance@v2
+        with:
+          subject-path: "dist/*.jar"
+
+      - name: Keep the build in the run
+        uses: actions/upload-artifact@v4
+        with:
+          name: release-files
+          path: dist/*
+          if-no-files-found: error
+          retention-days: 14
+
+      - name: Publish the release
+        if: startsWith(github.ref, 'refs/tags/')
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          tag="$GITHUB_REF_NAME"
+          {
+            echo "The build is unsigned. Check the SHA-256 below against the file you downloaded, or run \`gh attestation verify\` to see which workflow produced it."
+            echo
+            echo "**checksums.txt**"
+            echo
+            echo '```'
+            cat dist/checksums.txt
+            echo '```'
+            echo
+            echo "**Verify**"
+            echo
+            echo '```sh'
+            echo "sha256sum -c checksums.txt    # macOS: shasum -a 256 -c checksums.txt"
+            echo "gh attestation verify <file> --repo $GITHUB_REPOSITORY"
+            echo '```'
+          } > "$RUNNER_TEMP/notes.md"
+
+          if gh release view "$tag" --repo "$GITHUB_REPOSITORY" >/dev/null 2>&1; then
+            gh release upload "$tag" dist/*.jar dist/checksums.txt --repo "$GITHUB_REPOSITORY" --clobber
+          else
+            gh release create "$tag" dist/*.jar dist/checksums.txt --repo "$GITHUB_REPOSITORY" --title "Mix Client $tag" --notes-file "$RUNNER_TEMP/notes.md" --verify-tag
+          fi
