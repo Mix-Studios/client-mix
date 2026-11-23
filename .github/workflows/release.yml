@@ -17,19 +17,10 @@ name: Release
 # version, pre-release flag, and one entry per file with platform, arch, format,
 # size, SHA-256 and download URL. It is uploaded next to checksums.txt and is
 # deliberately not listed inside checksums.txt.
-#
-# Tags that name a test build (Test, 1.2.0-beta.1, rc1) or that are not a plain
-# version (v1.2.3) are published as GitHub pre-releases. GitHub's "latest" then
-# keeps pointing at the stable build, so a test tag cannot take over the site's
-# download button or /releases/latest. The site lists pre-releases on its own
-# test-builds page instead.
 
 on:
   push:
-    # Every tag publishes: a plain version (v1.2.3) as a normal release, and any
-    # other tag (Test, v1.2.0-beta.1, nightly-*) as a pre-release, which GitHub's
-    # "latest" and the site's download button both skip.
-    tags: ["**"]
+    tags: ["v*"]
   workflow_dispatch:
 
 permissions:
@@ -74,19 +65,54 @@ jobs:
           if-no-files-found: error
           retention-days: 14
 
-  jar:
-    name: Runnable jar
-    needs: [client]
+  client-legacy:
+    name: Client mod (1.8.9)
     runs-on: ubuntu-latest
     steps:
       - name: Check out
         uses: actions/checkout@v4
 
-      - name: Fetch the client mod
+      - name: Set up Java 8
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: "8"
+
+      # ForgeGradle 2.1 and its Gradle 4.4.1 wrapper only run on Java 8.
+      - name: Build the 1.8.9 client mod
+        working-directory: Client/1.8.9/cloudclient
+        run: |
+          set -euo pipefail
+          chmod +x gradlew
+          ./gradlew --no-daemon build -PclientVersion="${VERSION#v}"
+
+      - name: Keep the 1.8.9 client jar in the run
+        uses: actions/upload-artifact@v4
+        with:
+          name: client-1.8.9
+          path: Client/1.8.9/cloudclient/build/libs/*.jar
+          if-no-files-found: error
+          retention-days: 14
+
+  jar:
+    name: Runnable jar
+    needs: [client, client-legacy]
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check out
+        uses: actions/checkout@v4
+
+      - name: Fetch the 26.3 client mod
         uses: actions/download-artifact@v4
         with:
           name: client-26.3
           path: client-libs/26.3
+
+      - name: Fetch the 1.8.9 client mod
+        uses: actions/download-artifact@v4
+        with:
+          name: client-1.8.9
+          path: client-libs/1.8.9
 
       - name: Set up Java 21
         uses: actions/setup-java@v4
@@ -122,7 +148,7 @@ jobs:
 
   installer:
     name: ${{ matrix.label }}
-    needs: [client]
+    needs: [client, client-legacy]
     runs-on: ${{ matrix.os }}
     strategy:
       fail-fast: false
@@ -152,11 +178,17 @@ jobs:
       - name: Check out
         uses: actions/checkout@v4
 
-      - name: Fetch the client mod
+      - name: Fetch the 26.3 client mod
         uses: actions/download-artifact@v4
         with:
           name: client-26.3
           path: client-libs/26.3
+
+      - name: Fetch the 1.8.9 client mod
+        uses: actions/download-artifact@v4
+        with:
+          name: client-1.8.9
+          path: client-libs/1.8.9
 
       - name: Set up Java 21
         uses: actions/setup-java@v4
@@ -305,22 +337,13 @@ jobs:
                   "url": f"https://github.com/{repo}/releases/download/{tag}/{name}",
               })
 
-          # Same rule as the release channel below: a named test tag, or a tag that
-          # is not a plain version, is a pre-release.
-          version_shaped = re.match(r"^v?[0-9]+\.[0-9]+(\.[0-9]+)?$", tag) is not None
-          named_test = re.search(
-              r"(^|[^a-z])(test|beta|alpha|preview|snapshot|nightly|canary|rc[0-9]*)([^a-z]|$)",
-              tag,
-              re.I,
-          ) is not None
-
           latest = {
               "schema": 1,
               "version": tag,
               "version_number": tag.lstrip("vV"),
               "name": f"Mix Client {tag}",
               "published_at": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
-              "prerelease": bool(named_test or not version_shaped),
+              "prerelease": bool(re.search(r"test|beta|alpha|preview|snapshot|nightly|canary|\brc\d*\b", tag, re.I)),
               "release_url": f"https://github.com/{repo}/releases/tag/{tag}",
               "checksums_url": f"https://github.com/{repo}/releases/download/{tag}/checksums.txt",
               "files": files,
@@ -344,17 +367,6 @@ jobs:
         run: |
           set -euo pipefail
           tag="$GITHUB_REF_NAME"
-
-          # Test tags and non-version tags become pre-releases, so GitHub's
-          # "latest" (and every download button that follows it) keeps the
-          # stable build.
-          if printf '%s' "$tag" | grep -Eiq '(^|[^a-z])(test|beta|alpha|preview|snapshot|nightly|canary|rc[0-9]*)([^a-z]|$)' \
-             || ! printf '%s' "$tag" | grep -Eq '^v?[0-9]+\.[0-9]+(\.[0-9]+)?$'; then
-            prerelease="--prerelease"
-          else
-            prerelease=""
-          fi
-
           {
             echo "Installers for Windows, macOS (Apple silicon and Intel) and Linux (DEB and RPM), plus the plain runnable jar. Each one bundles its own Java runtime."
             echo
@@ -368,10 +380,6 @@ jobs:
             cat dist/checksums.txt
             echo '```'
             echo
-            if [ -n "$prerelease" ]; then
-              echo "**Test build.** This tag is not a stable version, so it is published as a pre-release and is not offered as the main download."
-              echo
-            fi
             echo "**Machine-readable**"
             echo
             echo "\`latest.json\` lists the version and every file with its platform, size and SHA-256, so the launcher can check for its own update."
@@ -387,13 +395,7 @@ jobs:
           files=(dist/*)
           if gh release view "$tag" --repo "$GITHUB_REPOSITORY" >/dev/null 2>&1; then
             gh release upload "$tag" "${files[@]}" --repo "$GITHUB_REPOSITORY" --clobber
-            # Re-running a test tag promotes it to pre-release even if it was
-            # published as stable before this rule existed.
-            if [ -n "$prerelease" ]; then
-              gh release edit "$tag" --repo "$GITHUB_REPOSITORY" --prerelease
-            fi
           else
-            # shellcheck disable=SC2086  # $prerelease is a flag or empty
             gh release create "$tag" "${files[@]}" --repo "$GITHUB_REPOSITORY" \
-              --title "Mix Client $tag" --notes-file "$RUNNER_TEMP/notes.md" --verify-tag $prerelease
+              --title "Mix Client $tag" --notes-file "$RUNNER_TEMP/notes.md" --verify-tag
           fi
