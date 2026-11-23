@@ -8,3 +8,4 @@ out/
 client-libs/
 ._*
 /MixClient-*.jar
+/logs/
