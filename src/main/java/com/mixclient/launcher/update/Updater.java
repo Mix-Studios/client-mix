@@ -531,11 +531,28 @@ public final class Updater {
         return trimmed;
     }
 
+    /** How the freshly installed launcher behaved after it was started. */
+    private enum Start {
+        /** It reported its window, so the new build is the one running. */
+        UP,
+        /** It is still running but has not reported in yet: leave it alone. */
+        SLOW,
+        /** It closed without reporting its window. */
+        CLOSED,
+        /** It exited with an error and the previous build was put back. */
+        ROLLED_BACK
+    }
+
     /**
-     * Installs {@code release}: opens its installer, or replaces the jar, starts it and waits for
-     * it to report that it came up. Nothing is installed before its SHA-256 matched.
+     * Installs {@code release}: opens its installer, or replaces the jar, starts it and watches it
+     * long enough to know it came up. Nothing is installed before its SHA-256 matched.
+     *
+     * @return true when this process should exit because the new build is already running (or an
+     *         installer was handed over); false when this launcher is still the one in charge, so
+     *         it must keep its window instead of leaving the player with none or with two
      */
-    public static void apply(Release release, Path updatesDir, Consumer<String> status) throws IOException {
+    public static boolean apply(Release release, Path updatesDir, Consumer<String> status)
+            throws IOException {
         Files.createDirectories(updatesDir);
 
         if (isPackaged() && release.installerUrl() != null) {
@@ -544,7 +561,7 @@ public final class Updater {
                     release.installerSha256(), release.checksumUrl(), updatesDir, status);
             status.accept("Opening the " + release.installerName() + " installer…");
             open(installer);
-            return;
+            return true;
         }
 
         if (release.jarUrl() == null) {
@@ -557,7 +574,8 @@ public final class Updater {
         Install install = installJar(jar, status);
         status.accept("Starting MixClient " + release.version() + "…");
         Process child = relaunch(install.jar());
-        awaitStart(child, install, release, status);
+        Start start = awaitStart(child, install, release, status);
+        return start == Start.UP || start == Start.SLOW;
     }
 
     /**
@@ -583,44 +601,75 @@ public final class Updater {
     }
 
     /**
-     * Waits for the new launcher to record that it started. If it exits or never gets that far,
-     * the build it replaced is put back and started, so a broken release cannot leave the machine
-     * without a working MixClient.
+     * Watches the new launcher until it reports its window, exits, or {@link #START_TIMEOUT_MS}
+     * passes.
+     *
+     * <p>The previous build is only put back when the new one <em>exited with an error</em>: a
+     * launcher that is merely slow is left running untouched, because replacing it mid-start would
+     * end with two windows. A clean exit is not treated as a failure either.</p>
      */
-    private static void awaitStart(Process child, Install install, Release release,
-                                   Consumer<String> status) {
-        Path backup = install.backup();
-        if (backup == null || !Files.exists(backup)) {
-            return;
-        }
-
+    private static Start awaitStart(Process child, Install install, Release release,
+                                    Consumer<String> status) {
         long launchedAt = System.currentTimeMillis();
-        while (System.currentTimeMillis() - launchedAt < START_TIMEOUT_MS) {
+        while (child.isAlive() && System.currentTimeMillis() - launchedAt < START_TIMEOUT_MS) {
             if (startedSince(launchedAt, release.version())) {
-                return;
-            }
-            if (!child.isAlive()) {
-                break;
+                return Start.UP;
             }
             try {
                 Thread.sleep(250);
             } catch (InterruptedException e) {
                 Thread.currentThread().interrupt();
-                return;
+                return Start.SLOW;
             }
+        }
+        if (startedSince(launchedAt, release.version())) {
+            return Start.UP;
+        }
+
+        Path backup = install.backup();
+        boolean canRollBack = backup != null && Files.exists(backup);
+        String kept = canRollBack ? " (previous build kept as " + backup.getFileName() + ")" : "";
+
+        if (child.isAlive()) {
+            status.accept("MixClient " + release.version() + " is still starting; leaving it running"
+                    + kept);
+            System.err.println("[update] MixClient " + release.version()
+                    + " has not reported in after " + (START_TIMEOUT_MS / 1000)
+                    + "s but is still running; not rolling back");
+            return Start.SLOW;
+        }
+
+        int code = exitCode(child);
+        if (code == 0 || !canRollBack) {
+            status.accept("MixClient " + release.version() + " closed before it reported in"
+                    + (code == 0 ? "" : " (exit " + code + ")")
+                    + "; you are still on MixClient " + BuildInfo.VERSION);
+            System.err.println("[update] MixClient " + release.version() + " exited with " + code
+                    + " before reporting in; nothing was restored");
+            return Start.CLOSED;
         }
 
         try {
             Files.copy(backup, install.jar(), StandardCopyOption.REPLACE_EXISTING);
-            status.accept("MixClient " + release.version()
-                    + " didn't start; rolled back to the previous build.");
-            System.err.println("[update] MixClient " + release.version()
-                    + " did not start; restored " + backup);
-            relaunch(install.jar());
+            status.accept("MixClient " + release.version() + " failed to start (exit " + code
+                    + "); still running MixClient " + BuildInfo.VERSION);
+            System.err.println("[update] MixClient " + release.version() + " exited with " + code
+                    + "; restored " + backup);
+            return Start.ROLLED_BACK;
         } catch (IOException e) {
-            status.accept("MixClient " + release.version() + " didn't start and the rollback failed: "
-                    + e.getMessage());
+            status.accept("MixClient " + release.version() + " failed to start (exit " + code
+                    + ") and the rollback failed: " + e.getMessage());
             System.err.println("[update] rollback failed: " + e);
+            return Start.CLOSED;
+        }
+    }
+
+    /** The child's exit status; -1 if it is somehow still running. */
+    private static int exitCode(Process child) {
+        try {
+            return child.exitValue();
+        } catch (IllegalThreadStateException e) {
+            return -1;
         }
     }
 
@@ -643,8 +692,8 @@ public final class Updater {
     }
 
     /**
-     * Records that this build reached its window. The launcher that installed it watches for
-     * this before it drops the previous build; without it the update is rolled back.
+     * Records that this build reached its window. The launcher that installed it waits for this
+     * before it hands over; a build that exits with an error first is rolled back.
      */
     public static void noteStarted() {
         try {
