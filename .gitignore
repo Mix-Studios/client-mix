@@ -1,0 +1,9 @@
+.gradle/
+build/
+.build-tools/
+out/
+*.iml
+.idea/
+.DS_Store
+._*
+/MixClient-*-all.jar

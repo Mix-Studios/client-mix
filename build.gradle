@@ -1,0 +1,221 @@
+plugins {
+    id 'application'
+}
+
+group = 'com.mixclient'
+version = '1.0.0'
+
+repositories {
+    mavenCentral()
+}
+
+dependencies {
+    // Microsoft / Xbox Live authentication for Minecraft: Java Edition.
+    // 5.0.2 ships the official Minecraft launcher client id (00000000402b5328)
+    // as its default MsaApplicationConfig, so no Azure app registration is needed.
+    implementation 'net.raphimc:MinecraftAuth:5.0.2'
+
+    // Swing look and feel.
+    implementation 'com.formdev:flatlaf:3.8'
+
+    // JSON for accounts.json / config.json (also a transitive dependency of MinecraftAuth).
+    implementation 'com.google.code.gson:gson:2.14.0'
+}
+
+application {
+    mainClass = 'com.mixclient.launcher.MixClientLauncher'
+    applicationDefaultJvmArgs = ['-Dapple.awt.application.name=MixClient']
+}
+
+tasks.withType(JavaCompile).configureEach {
+    options.encoding = 'UTF-8'
+    options.release.set(17)
+}
+
+// ---------------------------------------------------------------------------
+// SMB share workaround.
+//
+// The project directory is an SMB mount: file locking is unsupported there (so
+// Gradle's file hasher fails) and macOS drops AppleDouble "​._*" entries next to
+// build output that Gradle cannot delete afterwards. Both .gradle/ and build/
+// are therefore symlinks to local disk.
+//
+// Gradle's stock clean deletes the build/ symlink itself; the next build then
+// recreates build/ as a real directory on the share and fails with "Unable to
+// delete file .../build/classes/java/main". Clean below empties the link target
+// instead and restores the link if it is missing, so clean is safe to repeat.
+// ---------------------------------------------------------------------------
+def localBuildDir = new File(
+        System.getProperty('user.home'),
+        '.gradle/project-build/' + rootDir.absolutePath.replaceFirst('^/', '').replaceAll('/', '_'))
+
+tasks.named('clean') {
+    delete = []
+    doLast {
+        def link = file('build')
+        def linkPath = link.toPath()
+
+        localBuildDir.mkdirs()
+
+        // A previous build or manual clean may have left a real directory on the share.
+        if (link.exists() && !java.nio.file.Files.isSymbolicLink(linkPath)) {
+            project.delete(link)
+        }
+        // Drop a dangling symlink so it can be recreated below.
+        if (java.nio.file.Files.isSymbolicLink(linkPath) && !link.exists()) {
+            java.nio.file.Files.delete(linkPath)
+        }
+        if (!java.nio.file.Files.exists(linkPath, java.nio.file.LinkOption.NOFOLLOW_LINKS)) {
+            try {
+                java.nio.file.Files.createSymbolicLink(linkPath, localBuildDir.toPath())
+            } catch (java.io.IOException e) {
+                throw new GradleException(
+                        "build/ is not a symlink and the share will not let Gradle delete it. " +
+                        "Run: rm -rf build && ln -s ${localBuildDir} build", e)
+            }
+        }
+
+        localBuildDir.listFiles()?.each { project.delete(it) }
+        logger.lifecycle("clean: emptied build/ (symlink to ${localBuildDir} kept)")
+    }
+}
+
+jar {
+    manifest {
+        attributes(
+                'Main-Class': application.mainClass.get(),
+                'Implementation-Title': 'MixClient Launcher',
+                'Implementation-Version': project.version
+        )
+    }
+}
+
+// Self-contained runnable jar: `./gradlew fatJar` -> build/libs/MixClient-1.0.0-all.jar
+tasks.register('fatJar', Jar) {
+    group = 'build'
+    description = 'Builds a runnable jar containing all runtime dependencies.'
+    archiveClassifier = 'all'
+    duplicatesStrategy = DuplicatesStrategy.EXCLUDE
+
+    manifest {
+        attributes(
+                'Main-Class': application.mainClass.get(),
+                'Implementation-Title': 'MixClient Launcher',
+                'Implementation-Version': project.version
+        )
+    }
+
+    from sourceSets.main.output
+    from {
+        configurations.runtimeClasspath.collect { it.isDirectory() ? it : zipTree(it) }
+    } {
+        exclude 'META-INF/*.SF', 'META-INF/*.DSA', 'META-INF/*.RSA', 'module-info.class'
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Native installers.
+//
+// jpackage only builds for the machine it runs on, so every platform is
+// packaged on its own OS (CI does that in .github/workflows/release.yml).
+// Locally this produces the installer for the current OS:
+//
+//   ./gradlew packageInstaller                  # dmg on macOS, msi on Windows, deb on Linux
+//   ./gradlew packageInstaller -PinstallerType=rpm
+//
+// Output: build/installer/dist/
+// ---------------------------------------------------------------------------
+def appName = 'MixClient'
+def installerOs = System.getProperty('os.name').toLowerCase(Locale.ROOT)
+def installerType = (findProperty('installerType')
+        ?: (installerOs.contains('win') ? 'msi' : installerOs.contains('mac') ? 'dmg' : 'deb')).toString()
+
+def jdkBin = new File(System.getProperty('java.home'), 'bin')
+def installerDir = layout.buildDirectory.dir('installer')
+
+// Modules the launcher actually needs: Swing, java.net.http (MinecraftAuth),
+// TLS through the EC provider, logging and Gson's reflection support.
+def bundledModules = [
+        'java.base', 'java.desktop', 'java.logging', 'java.net.http', 'java.naming',
+        'jdk.crypto.ec', 'jdk.unsupported'
+].join(',')
+
+tasks.register('installerInput', Copy) {
+    description = 'Stages the runnable jar as the only input file for jpackage.'
+    dependsOn tasks.named('fatJar')
+    from(tasks.named('fatJar').flatMap { it.archiveFile })
+    into installerDir.map { it.dir('input') }
+}
+
+tasks.register('installerRuntime', Exec) {
+    description = 'Builds the trimmed Java runtime that the installers bundle.'
+    dependsOn tasks.named('installerInput')
+
+    def runtimeDir = installerDir.get().dir('runtime').asFile
+    outputs.dir(runtimeDir)
+
+    executable = new File(jdkBin, 'jlink').absolutePath
+    args = [
+            '--add-modules', bundledModules,
+            '--strip-debug', '--no-header-files', '--no-man-pages',
+            '--output', runtimeDir.absolutePath
+    ]
+    doFirst { project.delete(runtimeDir) }
+}
+
+tasks.register('packageInstaller', Exec) {
+    group = 'distribution'
+    description = 'Builds a native installer for this OS with jpackage (dmg, msi, deb or rpm).'
+    dependsOn tasks.named('installerInput'), tasks.named('installerRuntime')
+
+    def inputDir = installerDir.get().dir('input').asFile
+    def runtimeDir = installerDir.get().dir('runtime').asFile
+    def distDir = installerDir.get().dir('dist').asFile
+    def fatJarName = tasks.named('fatJar').get().archiveFileName.get()
+
+    executable = new File(jdkBin, 'jpackage').absolutePath
+
+    def packageArgs = [
+            '--type', installerType,
+            '--name', appName,
+            '--app-version', project.version.toString(),
+            '--vendor', 'Mix Studios',
+            '--description', 'MixClient launcher for Minecraft: Java Edition',
+            '--copyright', 'Mix Studios',
+            '--input', inputDir.absolutePath,
+            '--main-jar', fatJarName,
+            '--main-class', application.mainClass.get(),
+            '--runtime-image', runtimeDir.absolutePath,
+            '--dest', distDir.absolutePath,
+            '--java-options', '-Dapple.awt.application.name=MixClient'
+    ]
+
+    if (installerType == 'msi' || installerType == 'exe') {
+        packageArgs += [
+                '--win-menu', '--win-shortcut', '--win-dir-chooser', '--win-per-user-install',
+                // Stable id so a newer MSI upgrades an installed copy instead of stacking up.
+                '--win-upgrade-uuid', '3f6b9d52-8c1e-4a77-9b04-2e5c1d8a7b31'
+        ]
+    } else if (installerType == 'dmg' || installerType == 'pkg') {
+        packageArgs += [
+                '--mac-package-identifier', 'com.mixclient.launcher',
+                '--mac-package-name', appName
+        ]
+    } else {
+        packageArgs += [
+                '--linux-shortcut',
+                '--linux-menu-group', 'Games',
+                '--linux-app-category', 'game',
+                '--linux-deb-maintainer', 'Mix Studios <mixstudios@users.noreply.github.com>'
+        ]
+        if (installerType == 'rpm') {
+            packageArgs += ['--linux-rpm-license-type', 'MIT']
+        }
+    }
+
+    args = packageArgs
+    doFirst { distDir.mkdirs() }
+    doLast {
+        logger.lifecycle("installer: ${distDir.listFiles()?.collect { it.name }?.join(', ')}")
+    }
+}
