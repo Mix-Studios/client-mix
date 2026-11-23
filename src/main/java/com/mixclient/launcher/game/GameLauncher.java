@@ -40,7 +40,17 @@ public final class GameLauncher {
     public static Process start(PreparedInstall install, PlayerSession session, LauncherConfig config,
                                 Path javaExecutable, Consumer<String> logSink,
                                 Consumer<Integer> onExit) throws IOException {
-        List<String> command = buildCommand(install, session, config, javaExecutable);
+        return start(install, session, config, javaExecutable, null, logSink, onExit);
+    }
+
+    /**
+     * Starts the game with an extra natives directory searched before the version's own one. On
+     * Apple silicon 1.8.9 uses the arm64 LWJGL 2 natives there so it does not need Rosetta.
+     */
+    public static Process start(PreparedInstall install, PlayerSession session, LauncherConfig config,
+                                Path javaExecutable, Path nativesOverride, Consumer<String> logSink,
+                                Consumer<Integer> onExit) throws IOException {
+        List<String> command = buildCommand(install, session, config, javaExecutable, nativesOverride);
         logSink.accept(Redact.line("$ " + String.join(" ", Redact.command(command))));
 
         ProcessBuilder builder = new ProcessBuilder(command)
@@ -72,11 +82,18 @@ public final class GameLauncher {
     public static List<String> buildCommand(PreparedInstall install, PlayerSession session,
                                             LauncherConfig config, Path javaExecutable)
             throws IOException {
+        return buildCommand(install, session, config, javaExecutable, null);
+    }
+
+    public static List<String> buildCommand(PreparedInstall install, PlayerSession session,
+                                            LauncherConfig config, Path javaExecutable,
+                                            Path nativesOverride) throws IOException {
         JsonObject meta = install.meta();
         Map<String, Boolean> features = VersionResolver.defaultFeatures();
 
         String classpath = buildClasspath(install);
-        Map<String, String> vars = placeholders(install, session, classpath, config);
+        String nativesPath = libraryPath(install, nativesOverride);
+        Map<String, String> vars = placeholders(install, session, classpath, nativesPath, config);
 
         List<String> command = new ArrayList<>();
         // The caller picks the Java per version (1.8.9 wants an Intel Java 8, 26.3 needs 25+), so
@@ -102,7 +119,7 @@ public final class GameLauncher {
                 command.add(arg);
             }
         } else {
-            command.add("-Djava.library.path=" + install.nativesDir());
+            command.add("-Djava.library.path=" + nativesPath);
             command.add("-cp");
             command.add(classpath);
         }
@@ -152,8 +169,16 @@ public final class GameLauncher {
         return result;
     }
 
+        /** The arm64 natives first, then whatever the version installed (Intel natives on 1.8.9). */
+    private static String libraryPath(PreparedInstall install, Path nativesOverride) {
+        return nativesOverride == null
+                ? install.nativesDir().toString()
+                : nativesOverride + File.pathSeparator + install.nativesDir();
+    }
+
     private static Map<String, String> placeholders(PreparedInstall install, PlayerSession session,
-                                                    String classpath, LauncherConfig config) {
+                                                     String classpath, String libraryPath,
+                                                     LauncherConfig config) {
         Map<String, String> vars = new LinkedHashMap<>();
         vars.put("auth_player_name", session.username());
         vars.put("auth_uuid", session.uuid());
@@ -170,7 +195,7 @@ public final class GameLauncher {
         vars.put("game_assets", install.legacyAssetsDir() != null
                 ? install.legacyAssetsDir().toString() : install.assetsDir().toString());
         vars.put("assets_index_name", install.assetIndexId());
-        vars.put("natives_directory", install.nativesDir().toString());
+        vars.put("natives_directory", libraryPath);
         vars.put("library_directory", install.gameDir().resolve("libraries").toString());
         vars.put("classpath", classpath);
         vars.put("classpath_separator", File.pathSeparator);

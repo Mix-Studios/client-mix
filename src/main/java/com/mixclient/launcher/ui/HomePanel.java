@@ -11,6 +11,7 @@ import com.mixclient.launcher.core.Progress;
 import com.mixclient.launcher.game.AssetInstaller;
 import com.mixclient.launcher.game.GameLauncher;
 import com.mixclient.launcher.game.JavaRuntime;
+import com.mixclient.launcher.game.LegacyMacRuntime;
 import com.mixclient.launcher.game.LoaderInstaller;
 import com.mixclient.launcher.game.MojangApi;
 import com.mixclient.launcher.game.PreparedInstall;
@@ -404,17 +405,38 @@ public final class HomePanel extends JPanel {
                 PreparedInstall install = new AssetInstaller(new MojangApi(AppPaths.cacheDir()), gameDir)
                         .prepare(loader.versionId(), reporter);
 
-                // Java is chosen per version (1.8.9 needs an Intel Java 8, 26.3 needs 25+); a
-                // missing runtime fails here with an actionable message instead of exit code 1.
+                // Java is chosen per version (1.8.9 needs Java 8, 26.3 needs 25+); a missing
+                // runtime fails here with an actionable message instead of exit code 1. On an
+                // Apple-silicon Mac, 1.8.9 gets an arm64 Java 8 and the patched LWJGL 2 natives,
+                // so it runs natively instead of through Rosetta (where Apple's OpenGL driver
+                // sometimes aborts it with SIGABRT / exit 134).
                 String javaOverride = config.javaFor(versionId);
-                JavaRuntime.Match java = JavaRuntime.resolve(versionId,
-                        install.requiredJavaMajor(), javaOverride);
+                JavaRuntime.Match java;
+                Path nativesOverride = null;
+                LegacyMacRuntime.Runtime nativeRuntime = null;
+                if (javaOverride.isBlank() && LegacyMacRuntime.isNeeded(install.requiredJavaMajor())) {
+                    try {
+                        nativeRuntime = LegacyMacRuntime.ensure(reporter);
+                    } catch (IOException e) {
+                        logPanel.append("[java] Could not install the Apple-silicon runtime: "
+                                + e.getMessage() + "; falling back to Rosetta");
+                    }
+                }
+                if (nativeRuntime != null) {
+                    java = new JavaRuntime.Match(nativeRuntime.java(), 8, "aarch64");
+                    nativesOverride = nativeRuntime.nativesDir();
+                    logPanel.append("[java] Using arm64 Java 8 with patched LWJGL 2 (no Rosetta)");
+                } else {
+                    java = JavaRuntime.resolve(versionId,
+                            install.requiredJavaMajor(), javaOverride);
+                }
                 logPanel.append("[java] " + loader.versionId() + " needs Java " + install.requiredJavaMajor()
                         + "+; using Java " + java.major() + " (" + java.arch() + "): " + java.java()
                         + (javaOverride.isBlank() ? "" : " (set for " + versionId + ")"));
 
                 SwingUtilities.invokeLater(() -> updateStatus("Starting Minecraft…", 1.0));
-                GameLauncher.start(install, session, config, java.java(), logPanel::append,
+                GameLauncher.start(install, session, config, java.java(), nativesOverride,
+                        logPanel::append,
                         code -> SwingUtilities.invokeLater(() -> onGameExit(code)));
 
                 logPanel.append("[launch] Minecraft started as " + session.username()
@@ -511,13 +533,24 @@ public final class HomePanel extends JPanel {
             try {
                 required = requiredJavaMajor(versionId);
                 String override = config.javaFor(versionId);
-                JavaRuntime.Match match = JavaRuntime.resolve(versionId, required, override);
-                text = JavaRuntime.describe(match, override);
-                tip = match.java().toString()
-                        + (override.isBlank() ? " (chosen automatically)" : " (set for " + versionId + ")");
-                if (match.major() < required) {
-                    text = "Java " + match.major() + " (" + match.arch() + ") — needs " + required + "+";
-                    color = Theme.ERROR;
+                LegacyMacRuntime.Runtime nativeRuntime = override.isBlank()
+                        && LegacyMacRuntime.isNeeded(required) ? LegacyMacRuntime.installed() : null;
+                if (nativeRuntime != null) {
+                    text = "Java 8 (aarch64), native";
+                    tip = nativeRuntime.java() + " with patched LWJGL 2 (no Rosetta)";
+                } else if (override.isBlank() && LegacyMacRuntime.isNeeded(required)) {
+                    text = "Java 8 (aarch64), installs on first Play";
+                    tip = "First Play downloads an Apple-silicon Java 8 and patched LWJGL 2 "
+                            + "(about 99 MB) so 1.8.9 does not need Rosetta.";
+                } else {
+                    JavaRuntime.Match match = JavaRuntime.resolve(versionId, required, override);
+                    text = JavaRuntime.describe(match, override);
+                    tip = match.java().toString()
+                            + (override.isBlank() ? " (chosen automatically)" : " (set for " + versionId + ")");
+                    if (match.major() < required) {
+                        text = "Java " + match.major() + " (" + match.arch() + ") — needs " + required + "+";
+                        color = Theme.ERROR;
+                    }
                 }
             } catch (JavaRuntime.MissingJavaException e) {
                 text = "No Java " + required + "+ found — pick one with Java…";

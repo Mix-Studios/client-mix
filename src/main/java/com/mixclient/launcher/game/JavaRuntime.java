@@ -20,11 +20,13 @@ import java.util.regex.Pattern;
 /**
  * Picks the Java runtime a Minecraft version needs.
  *
- * <p>Older releases pin their own Java: 1.8.9 was built for Java 8, and its LWJGL 2 natives are
- * Intel-only, so on an Apple-silicon Mac it needs a 64-bit Intel Java 8 or it dies with an
- * {@code UnsatisfiedLinkError} before it can even open a log file. Newer releases need Java 25 or
- * newer. The launcher therefore matches the version's {@code javaVersion.majorVersion} against the
- * runtimes installed on this machine instead of always reusing its own JVM.</p>
+ * <p>Older releases pin their own Java: 1.8.9 was built for Java 8, and its stock LWJGL 2 natives
+ * are Intel-only. On an Apple-silicon Mac that case is handled by
+ * {@link LegacyMacRuntime}, which installs an arm64 Java 8 and patched arm64 natives; the Intel
+ * Java 8 chosen here is the fallback when that runtime can't be installed. Newer releases need
+ * Java 25 or newer. The launcher therefore matches the version's
+ * {@code javaVersion.majorVersion} against the runtimes installed on this machine instead of
+ * always reusing its own JVM.</p>
  */
 public final class JavaRuntime {
 
@@ -86,7 +88,8 @@ public final class JavaRuntime {
     }
 
     private static Match choose(String versionId, int requiredMajor) throws MissingJavaException {
-        // 1.8.x has Intel-only natives, so an arm64 Java 8 would still crash on Apple silicon.
+        // 1.8.x's stock natives are Intel-only; Apple silicon normally uses the managed arm64
+        // runtime in LegacyMacRuntime, so this is the Intel fallback for that version.
         boolean intelOnly = requiredMajor <= 8 && isAppleSilicon();
 
         Match cached = CHOSEN.get(requiredMajor);
