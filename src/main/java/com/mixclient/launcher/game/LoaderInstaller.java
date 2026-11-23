@@ -144,7 +144,7 @@ public final class LoaderInstaller {
 
     private static void ensureFabricApi(Path gameDir, Progress progress) throws IOException {
         Path mods = gameDir.resolve("mods");
-        if (hasFabricApi(mods)) {
+        if (fabricApiForThisVersion(mods) != null) {
             return;
         }
 
@@ -177,7 +177,9 @@ public final class LoaderInstaller {
         }
 
         String filename = chosen.get("filename").getAsString();
-        api.download(chosen.get("url").getAsString(), mods.resolve(filename), progress);
+        Path target = mods.resolve(filename);
+        api.download(chosen.get("url").getAsString(), target, progress);
+        removeOtherFabricApis(mods, target);
     }
 
     private static JsonObject primaryFile(JsonObject version) {
@@ -201,14 +203,35 @@ public final class LoaderInstaller {
         return first;
     }
 
-    private static boolean hasFabricApi(Path mods) {
+    /**
+     * The installed Fabric API that is actually for {@link #FABRIC_MINECRAFT}, or null.
+     * Fabric API names its files {@code fabric-api-<mod version>+<minecraft version>.jar}, so a
+     * build for another Minecraft version must not count as installed.
+     */
+    private static Path fabricApiForThisVersion(Path mods) {
         if (!Files.isDirectory(mods)) {
-            return false;
+            return null;
         }
         try (DirectoryStream<Path> stream = Files.newDirectoryStream(mods, "fabric-api-*.jar")) {
-            return stream.iterator().hasNext();
+            for (Path jar : stream) {
+                if (jar.getFileName().toString().endsWith("+" + FABRIC_MINECRAFT + ".jar")) {
+                    return jar;
+                }
+            }
         } catch (IOException e) {
-            return false;
+            return null;
+        }
+        return null;
+    }
+
+    /** Fabric API builds for other Minecraft versions in the same mods folder break the launch. */
+    private static void removeOtherFabricApis(Path mods, Path keep) throws IOException {
+        try (DirectoryStream<Path> stream = Files.newDirectoryStream(mods, "fabric-api-*.jar")) {
+            for (Path jar : stream) {
+                if (!jar.equals(keep)) {
+                    Files.deleteIfExists(jar);
+                }
+            }
         }
     }
 
