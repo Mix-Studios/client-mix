@@ -15,11 +15,14 @@ import java.net.http.HttpRequest;
 import java.net.http.HttpResponse;
 import java.nio.file.Files;
 import java.nio.file.Path;
+import java.nio.charset.StandardCharsets;
 import java.nio.file.StandardCopyOption;
 import java.security.MessageDigest;
 import java.time.Duration;
+import java.util.ArrayList;
 import java.util.HashMap;
 import java.util.HexFormat;
+import java.util.List;
 import java.util.Locale;
 import java.util.Map;
 import java.util.function.Consumer;
@@ -39,6 +42,12 @@ public final class Updater {
 
     private static final String LATEST_RELEASE =
             "https://api.github.com/repos/" + REPOSITORY + "/releases/latest";
+    /**
+     * Published by the release workflow next to checksums.txt. Small, cache-free and not rate
+     * limited, unlike the GitHub API, and it already carries the per-file SHA-256.
+     */
+    private static final String LATEST_JSON = System.getProperty("mixclient.update.url",
+            "https://github.com/" + REPOSITORY + "/releases/latest/download/latest.json");
     private static final String USER_AGENT = "MixClient-Launcher/" + BuildInfo.VERSION;
 
     private static final HttpClient HTTP = HttpClient.newBuilder()
@@ -46,17 +55,292 @@ public final class Updater {
             .followRedirects(HttpClient.Redirect.NORMAL)
             .build();
 
-    /** What one release offers for this machine. */
+    /**
+     * What one release offers for this machine. The {@code *Sha256} values are filled from
+     * latest.json; when they are null the download falls back to the release's checksums.txt.
+     */
     public record Release(String tag, String version, String jarName, String jarUrl,
                           String installerName, String installerUrl, String checksumUrl,
-                          long size) {
+                          long size, String jarSha256, String installerSha256) {
     }
 
     private Updater() {
     }
 
-    /** Asks GitHub for the newest release. */
+    /** Asks for the newest release: latest.json first, the GitHub API as a fallback. */
     public static Release check() throws IOException, InterruptedException {
+        try {
+            return fromLatestJson();
+        } catch (IOException | RuntimeException e) {
+            System.err.println("[update] latest.json unavailable (" + e.getMessage()
+                    + "); falling back to the GitHub API");
+        }
+        return fromApi();
+    }
+
+    /**
+     * Reads the small {@code latest.json} the release publishes: version, a per-platform URL,
+     * size and SHA-256. One request, no API quota, and the hash to verify is already known.
+     */
+    private static Release fromLatestJson() throws IOException, InterruptedException {
+        HttpRequest request = HttpRequest.newBuilder(URI.create(LATEST_JSON))
+                .header("User-Agent", USER_AGENT)
+                .timeout(Duration.ofSeconds(15))
+                .GET()
+                .build();
+
+        HttpResponse<String> response = HTTP.send(request, HttpResponse.BodyHandlers.ofString());
+        if (response.statusCode() != 200) {
+            throw new IOException("HTTP " + response.statusCode());
+        }
+
+        JsonObject root = JsonParser.parseString(response.body()).getAsJsonObject();
+        // The published feed uses "version" for the tag plus "version_number"; older builds
+        // wrote "version" already stripped and a separate "tag".
+        String rawVersion = text(root, "version");
+        String tag = text(root, "tag");
+        String version = text(root, "version_number");
+        if (version == null && rawVersion != null) {
+            version = rawVersion.replaceFirst("^[vV]", "");
+        }
+        if (tag == null && rawVersion != null && rawVersion.matches("^[vV].*")) {
+            tag = rawVersion;
+        }
+        if (version == null || version.isBlank()) {
+            throw new IOException("latest.json has no version");
+        }
+        if (tag == null || tag.isBlank()) {
+            tag = "v" + version;
+        }
+
+        List<JsonObject> files = candidates(root);
+        JsonObject jar = bestJar(files);
+        JsonObject installer = bestInstaller(files);
+        if (installer == null && jar == null) {
+            throw new IOException("latest.json has no download for " + platformKey());
+        }
+
+        String checksumUrl = text(root, "checksums_url");
+        if (checksumUrl == null) {
+            checksumUrl = text(root, "checksums");
+        }
+        return new Release(tag, version,
+                fileName(jar), absolute(url(jar)),
+                fileName(installer), absolute(url(installer)),
+                checksumUrl, size(jar), sha256(jar), sha256(installer));
+    }
+
+    /**
+     * Every file entry in latest.json: the published {@code files} array, and the
+     * {@code assets} list or map older feeds used.
+     */
+    private static List<JsonObject> candidates(JsonObject root) {
+        List<JsonObject> result = new ArrayList<>();
+        addEntries(root.get("files"), result);
+        addEntries(root.get("assets"), result);
+        return result;
+    }
+
+    private static void addEntries(JsonElement element, List<JsonObject> target) {
+        if (element == null || element.isJsonNull()) {
+            return;
+        }
+        if (element.isJsonArray()) {
+            for (JsonElement item : element.getAsJsonArray()) {
+                if (item.isJsonObject()) {
+                    target.add(item.getAsJsonObject());
+                }
+            }
+        } else if (element.isJsonObject()) {
+            for (Map.Entry<String, JsonElement> entry : element.getAsJsonObject().entrySet()) {
+                if (entry.getValue().isJsonObject()) {
+                    target.add(entry.getValue().getAsJsonObject());
+                }
+            }
+        }
+    }
+
+    /** The launcher jar: the runnable {@code -all} jar when the release has one. */
+    private static JsonObject bestJar(List<JsonObject> files) {
+        JsonObject best = null;
+        boolean bestIsAll = false;
+        for (JsonObject file : files) {
+            String name = fileName(file);
+            if (name == null || !name.toLowerCase(Locale.ROOT).endsWith(".jar")) {
+                continue;
+            }
+            boolean isAll = name.toLowerCase(Locale.ROOT).contains("-all");
+            if (best == null || (isAll && !bestIsAll)) {
+                best = file;
+                bestIsAll = isAll;
+            }
+        }
+        return best;
+    }
+
+    /** The best installer for this OS and architecture, preferring the native format. */
+    private static JsonObject bestInstaller(List<JsonObject> files) {
+        JsonObject best = null;
+        int bestScore = 0;
+        for (JsonObject file : files) {
+            String name = fileName(file);
+            if (name == null || name.toLowerCase(Locale.ROOT).endsWith(".jar")) {
+                continue;
+            }
+            if (file.has("installer") && !file.get("installer").getAsBoolean()) {
+                continue;
+            }
+            if (!isForThisMachine(file, name)) {
+                continue;
+            }
+            int score = formatScore(file, name);
+            if (score > bestScore) {
+                best = file;
+                bestScore = score;
+            }
+        }
+        return best;
+    }
+
+    /** True when the entry's platform (and arch, when given) is this machine's. */
+    private static boolean isForThisMachine(JsonObject file, String name) {
+        String platform = text(file, "platform");
+        if (platform != null) {
+            String value = platform.toLowerCase(Locale.ROOT);
+            String os = osKey();
+            boolean matches = value.equals(os) || value.equals("any") || value.equals("universal")
+                    || (os.equals("macos") && value.equals("mac"))
+                    || (os.equals("windows") && (value.equals("win") || value.equals("win32")))
+                    || (os.equals("linux") && value.equals("unix"));
+            if (!matches) {
+                return false;
+            }
+        } else if (!isInstallerForThisOs(name.toLowerCase(Locale.ROOT))) {
+            return false;
+        }
+
+        String arch = text(file, "arch");
+        if (arch == null || arch.equalsIgnoreCase("any") || arch.equalsIgnoreCase("universal")) {
+            return true;
+        }
+        String value = arch.toLowerCase(Locale.ROOT);
+        boolean entryIsArm = value.equals("arm64") || value.equals("aarch64") || value.equals("arm");
+        return isArm() == entryIsArm;
+    }
+
+    /** Prefers the native format for this OS: dmg on macOS, msi on Windows, deb over rpm. */
+    private static int formatScore(JsonObject file, String name) {
+        String format = text(file, "format");
+        String ext = format == null
+                ? name.substring(name.lastIndexOf('.') + 1)
+                : format;
+        ext = ext.toLowerCase(Locale.ROOT).replace(".", "");
+        String os = osKey();
+        if (os.equals("macos")) {
+            return switch (ext) {
+                case "dmg" -> 3;
+                case "pkg" -> 2;
+                default -> 1;
+            };
+        }
+        if (os.equals("windows")) {
+            return switch (ext) {
+                case "msi" -> 3;
+                case "exe" -> 2;
+                default -> 1;
+            };
+        }
+        boolean rpm = isRpmDistro();
+        return switch (ext) {
+            case "deb" -> rpm ? 1 : 3;
+            case "rpm" -> rpm ? 3 : 1;
+            case "appimage" -> 2;
+            default -> 1;
+        };
+    }
+
+    private static String text(JsonObject object, String key) {
+        if (object == null || !object.has(key) || object.get(key).isJsonNull()) {
+            return null;
+        }
+        return object.get(key).getAsString();
+    }
+
+    private static String url(JsonObject asset) {
+        return asset != null && asset.has("url") ? asset.get("url").getAsString() : null;
+    }
+
+    private static String fileName(JsonObject asset) {
+        if (asset == null) {
+            return null;
+        }
+        if (asset.has("file")) {
+            return asset.get("file").getAsString();
+        }
+        if (asset.has("name")) {
+            return asset.get("name").getAsString();
+        }
+        String url = url(asset);
+        if (url == null) {
+            return null;
+        }
+        int slash = url.lastIndexOf('/');
+        return slash < 0 ? url : url.substring(slash + 1);
+    }
+
+    private static long size(JsonObject asset) {
+        return asset != null && asset.has("size") ? asset.get("size").getAsLong() : 0;
+    }
+
+    private static String sha256(JsonObject asset) {
+        return asset != null && asset.has("sha256")
+                ? asset.get("sha256").getAsString().toLowerCase(Locale.ROOT) : null;
+    }
+
+    /** Resolves a path in latest.json against the file's own URL, so relative links work. */
+    private static String absolute(String url) {
+        if (url == null || url.isBlank()) {
+            return null;
+        }
+        return URI.create(LATEST_JSON).resolve(url.trim()).toString();
+    }
+
+    /** The key latest.json uses for this machine, e.g. {@code macos-arm64}. */
+    private static String platformKey() {
+        boolean arm = isArm();
+        String os = osKey();
+        return switch (os) {
+            case "windows" -> arm ? "windows-arm64" : "windows-x64";
+            case "macos" -> arm ? "macos-arm64" : "macos-x64";
+            default -> arm ? "linux-arm64" : (isRpmDistro() ? "linux-x86_64" : "linux-amd64");
+        };
+    }
+
+    private static String osKey() {
+        String os = System.getProperty("os.name", "").toLowerCase(Locale.ROOT);
+        return os.contains("win") ? "windows" : os.contains("mac") ? "macos" : "linux";
+    }
+
+    private static boolean isArm() {
+        String arch = System.getProperty("os.arch", "").toLowerCase(Locale.ROOT);
+        return arch.contains("aarch64") || arch.contains("arm64");
+    }
+
+    /** True on Fedora/RHEL/openSUSE, where the RPM is the right Linux download. */
+    private static boolean isRpmDistro() {
+        try {
+            String release = Files.readString(Path.of("/etc/os-release"), StandardCharsets.UTF_8)
+                    .toLowerCase(Locale.ROOT);
+            return release.contains("id_like=\"rhel") || release.contains("id_like=fedora")
+                    || release.contains("id=fedora") || release.contains("id=rhel")
+                    || release.contains("suse");
+        } catch (IOException | RuntimeException e) {
+            return false;
+        }
+    }
+
+    /** Asks the GitHub API for the newest release. */
+    private static Release fromApi() throws IOException, InterruptedException {
         HttpRequest request = HttpRequest.newBuilder(URI.create(LATEST_RELEASE))
                 .header("Accept", "application/vnd.github+json")
                 .header("User-Agent", USER_AGENT)
@@ -113,7 +397,8 @@ public final class Updater {
             throw new IOException("Release " + tag + " has no launcher file to download.");
         }
 
-        return new Release(tag, version, jarName, jarUrl, installerName, installerUrl, checksumUrl, size);
+        return new Release(tag, version, jarName, jarUrl, installerName, installerUrl,
+                checksumUrl, size, null, null);
     }
 
     private static String rateLimitHint(HttpResponse<String> response) {
@@ -169,7 +454,7 @@ public final class Updater {
         if (isPackaged() && release.installerUrl() != null) {
             status.accept("Downloading MixClient " + release.version() + " installer…");
             Path installer = download(release.installerName(), release.installerUrl(),
-                    release.checksumUrl(), updatesDir, status);
+                    release.installerSha256(), release.checksumUrl(), updatesDir, status);
             status.accept("Opening the " + release.installerName() + " installer…");
             open(installer);
             return;
@@ -180,7 +465,8 @@ public final class Updater {
         }
 
         status.accept("Downloading MixClient " + release.version() + "…");
-        Path jar = download(release.jarName(), release.jarUrl(), release.checksumUrl(), updatesDir, status);
+        Path jar = download(release.jarName(), release.jarUrl(),
+                release.jarSha256(), release.checksumUrl(), updatesDir, status);
         status.accept("Restarting into MixClient " + release.version() + "…");
         relaunch(jar);
     }
@@ -190,8 +476,8 @@ public final class Updater {
         return System.getProperty("jpackage.app-path") != null;
     }
 
-    private static Path download(String name, String url, String checksumUrl, Path dir,
-                                 Consumer<String> status) throws IOException {
+    private static Path download(String name, String url, String expectedSha, String checksumUrl,
+                                 Path dir, Consumer<String> status) throws IOException {
         Path target = dir.resolve(name);
         Path temp = dir.resolve(name + ".part");
 
@@ -217,7 +503,9 @@ public final class Updater {
             }
         }
 
-        String expected = checksumUrl == null ? null : checksums(checksumUrl).get(name);
+        // latest.json hands us the hash; otherwise read it from the release's checksums.txt.
+        String expected = expectedSha != null ? expectedSha
+                : checksumUrl == null ? null : checksums(checksumUrl).get(name);
         if (expected != null) {
             String actual = HexFormat.of().formatHex(digest.digest());
             if (!expected.equalsIgnoreCase(actual)) {
