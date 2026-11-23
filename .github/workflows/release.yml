@@ -16,21 +16,11 @@ name: Release
 # latest.json is the machine-readable update feed the launcher reads at startup:
 # version, pre-release flag, and one entry per file with platform, arch, format,
 # size, SHA-256 and download URL. It is uploaded next to checksums.txt and is
-# deliberately not listed inside checksums.txt. It is attested with the builds,
-# so an updater can verify the feed itself before trusting the URLs inside it.
-#
-# Tags that name a test build (Test, 1.2.0-beta.1, rc1) or that are not a plain
-# version (v1.2.3) are published as GitHub pre-releases. GitHub's "latest" then
-# keeps pointing at the stable build, so a test tag cannot take over the site's
-# download button or /releases/latest. The site lists pre-releases on its own
-# test-builds page instead.
+# deliberately not listed inside checksums.txt.
 
 on:
   push:
-    # Every tag publishes: a plain version (v1.2.3) as a normal release, and any
-    # other tag (Test, v1.2.0-beta.1, nightly-*) as a pre-release, which GitHub's
-    # "latest" and the site's download button both skip.
-    tags: ["**"]
+    tags: ["v*"]
   workflow_dispatch:
 
 permissions:
@@ -347,22 +337,13 @@ jobs:
                   "url": f"https://github.com/{repo}/releases/download/{tag}/{name}",
               })
 
-          def is_prerelease_tag(tag):
-              lowered = tag.lower()
-              named = re.search(
-                  r"(^|[^a-z])(test|beta|alpha|preview|snapshot|nightly|canary|rc\d*)([^a-z]|$)",
-                  lowered,
-              )
-              shaped = re.match(r"^v?\d+(\.\d+)*$", lowered)
-              return bool(named) or not shaped
-
           latest = {
               "schema": 1,
               "version": tag,
               "version_number": tag.lstrip("vV"),
               "name": f"Mix Client {tag}",
               "published_at": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
-              "prerelease": is_prerelease_tag(tag),
+              "prerelease": bool(re.search(r"test|beta|alpha|preview|snapshot|nightly|canary|\brc\d*\b", tag, re.I)),
               "release_url": f"https://github.com/{repo}/releases/tag/{tag}",
               "checksums_url": f"https://github.com/{repo}/releases/download/{tag}/checksums.txt",
               "files": files,
@@ -378,9 +359,7 @@ jobs:
       - name: Attest build provenance
         uses: actions/attest-build-provenance@v4
         with:
-          # latest.json is attested with the installers: it is the file that names
-          # the URLs, sizes and hashes the launcher is about to trust.
-          subject-path: "dist/*.jar,dist/*.msi,dist/*.dmg,dist/*.deb,dist/*.rpm,dist/latest.json"
+          subject-path: "dist/*.jar,dist/*.msi,dist/*.dmg,dist/*.deb,dist/*.rpm"
 
       - name: Publish the release
         env:
@@ -388,17 +367,6 @@ jobs:
         run: |
           set -euo pipefail
           tag="$GITHUB_REF_NAME"
-
-          # Same rule as latest.json: a tag that names a test build, or that is not
-          # a plain version, becomes a pre-release so /releases/latest keeps the
-          # stable build.
-          lower="$(printf '%s' "$tag" | tr '[:upper:]' '[:lower:]')"
-          prerelease="--prerelease"
-          if [[ "$lower" =~ ^v?[0-9]+(\.[0-9]+)*$ ]] &&
-             [[ ! "$lower" =~ (^|[^a-z])(test|beta|alpha|preview|snapshot|nightly|canary|rc[0-9]*)([^a-z]|$) ]]; then
-            prerelease=""
-          fi
-
           {
             echo "Installers for Windows, macOS (Apple silicon and Intel) and Linux (DEB and RPM), plus the plain runnable jar. Each one bundles its own Java runtime."
             echo
@@ -414,29 +382,20 @@ jobs:
             echo
             echo "**Machine-readable**"
             echo
-            echo "\`latest.json\` lists the version and every file with its platform, size and SHA-256, so the launcher can check for its own update. It is attested with the builds, so the feed itself can be verified before its URLs are trusted."
+            echo "\`latest.json\` lists the version and every file with its platform, size and SHA-256, so the launcher can check for its own update."
             echo
             echo "**Verify**"
             echo
             echo '```sh'
             echo "sha256sum -c checksums.txt    # macOS: shasum -a 256 -c checksums.txt"
             echo "gh attestation verify <file> --repo $GITHUB_REPOSITORY"
-            echo "gh attestation verify latest.json --repo $GITHUB_REPOSITORY"
             echo '```'
-            if [ -n "$prerelease" ]; then
-              echo
-              echo "**Test build.** This tag is not a stable version, so it is published as a pre-release and is not offered as the main download."
-            fi
           } > "$RUNNER_TEMP/notes.md"
 
           files=(dist/*)
           if gh release view "$tag" --repo "$GITHUB_REPOSITORY" >/dev/null 2>&1; then
             gh release upload "$tag" "${files[@]}" --repo "$GITHUB_REPOSITORY" --clobber
-            # A test tag published before this rule existed gets fixed up.
-            if [ -n "$prerelease" ]; then
-              gh release edit "$tag" --repo "$GITHUB_REPOSITORY" --prerelease
-            fi
           else
             gh release create "$tag" "${files[@]}" --repo "$GITHUB_REPOSITORY" \
-              --title "Mix Client $tag" --notes-file "$RUNNER_TEMP/notes.md" --verify-tag $prerelease
+              --title "Mix Client $tag" --notes-file "$RUNNER_TEMP/notes.md" --verify-tag
           fi

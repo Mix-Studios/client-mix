@@ -447,7 +447,7 @@ public final class Updater {
         return trimmed;
     }
 
-    /** Installs {@code release}: opens its installer, or restarts from the downloaded jar. */
+    /** Installs {@code release}: opens its installer, or replaces the jar and restarts. */
     public static void apply(Release release, Path updatesDir, Consumer<String> status) throws IOException {
         Files.createDirectories(updatesDir);
 
@@ -467,8 +467,84 @@ public final class Updater {
         status.accept("Downloading MixClient " + release.version() + "…");
         Path jar = download(release.jarName(), release.jarUrl(),
                 release.jarSha256(), release.checksumUrl(), updatesDir, status);
+        Path installed = installJar(jar, status);
         status.accept("Restarting into MixClient " + release.version() + "…");
-        relaunch(jar);
+        relaunch(installed);
+    }
+
+    /**
+     * Puts the verified jar where the launcher runs from, so the next start is the new version
+     * too. The previous jar stays beside it as {@code .old} for a manual rollback. When that
+     * location can't be written (a read-only install, an IDE run, a locked file on Windows) the
+     * downloaded copy in the updates folder is started instead.
+     */
+    private static Path installJar(Path downloaded, Consumer<String> status) {
+        Path running = BuildInfo.jarPath();
+        if (running == null) {
+            status.accept("Running from a build directory; starting the downloaded launcher.");
+            return downloaded;
+        }
+        try {
+            replaceVerified(downloaded, running, status);
+            return running;
+        } catch (IOException e) {
+            status.accept("Couldn't replace the launcher (" + e.getMessage()
+                    + "); starting the new copy from the updates folder.");
+            return downloaded;
+        }
+    }
+
+    /**
+     * Copies {@code downloaded} over {@code target}, checking the SHA-256 of the copy before it is
+     * moved in and again after, and restoring the previous file if either check fails. Replacing
+     * (not overwriting) the running jar works on macOS and Linux because the JVM keeps its own
+     * handle on the old file.
+     */
+    static void replaceVerified(Path downloaded, Path target, Consumer<String> status)
+            throws IOException {
+        String expected = sha256Of(downloaded);
+        Path staging = target.resolveSibling(target.getFileName() + ".new");
+        Path backup = target.resolveSibling(target.getFileName() + ".old");
+
+        Files.copy(downloaded, staging, StandardCopyOption.REPLACE_EXISTING);
+        if (!expected.equals(sha256Of(staging))) {
+            Files.deleteIfExists(staging);
+            throw new IOException("the copy didn't match its SHA-256");
+        }
+
+        Files.move(target, backup, StandardCopyOption.REPLACE_EXISTING);
+        try {
+            try {
+                Files.move(staging, target, StandardCopyOption.ATOMIC_MOVE);
+            } catch (IOException atomicMoveUnsupported) {
+                Files.copy(staging, target, StandardCopyOption.REPLACE_EXISTING);
+                Files.deleteIfExists(staging);
+            }
+        } catch (IOException e) {
+            Files.move(backup, target, StandardCopyOption.REPLACE_EXISTING);
+            throw new IOException("couldn't put it in place: " + e.getMessage(), e);
+        }
+
+        if (!expected.equals(sha256Of(target))) {
+            Files.deleteIfExists(target);
+            Files.move(backup, target, StandardCopyOption.REPLACE_EXISTING);
+            throw new IOException("the installed file didn't match its SHA-256");
+        }
+
+        status.accept("Replaced " + target.getFileName() + " (previous kept as "
+                + backup.getFileName() + ")");
+    }
+
+    private static String sha256Of(Path file) throws IOException {
+        MessageDigest digest = sha256();
+        try (InputStream in = Files.newInputStream(file)) {
+            byte[] buffer = new byte[64 * 1024];
+            int read;
+            while ((read = in.read(buffer)) >= 0) {
+                digest.update(buffer, 0, read);
+            }
+        }
+        return HexFormat.of().formatHex(digest.digest());
     }
 
     /** True when MixClient runs from an installer rather than a plain jar. */
@@ -506,15 +582,18 @@ public final class Updater {
         // latest.json hands us the hash; otherwise read it from the release's checksums.txt.
         String expected = expectedSha != null ? expectedSha
                 : checksumUrl == null ? null : checksums(checksumUrl).get(name);
-        if (expected != null) {
-            String actual = HexFormat.of().formatHex(digest.digest());
-            if (!expected.equalsIgnoreCase(actual)) {
-                Files.deleteIfExists(temp);
-                throw new IOException("Checksum mismatch for " + name
-                        + " (expected " + expected + ", got " + actual + ")");
-            }
-            status.accept("Verified " + name);
+        if (expected == null) {
+            Files.deleteIfExists(temp);
+            throw new IOException("No SHA-256 is published for " + name
+                    + ", so the update wasn't installed.");
         }
+        String actual = HexFormat.of().formatHex(digest.digest());
+        if (!expected.equalsIgnoreCase(actual)) {
+            Files.deleteIfExists(temp);
+            throw new IOException("Checksum mismatch for " + name
+                    + " (expected " + expected + ", got " + actual + ")");
+        }
+        status.accept("Verified " + name);
 
         Files.move(temp, target, StandardCopyOption.REPLACE_EXISTING);
         return target;
