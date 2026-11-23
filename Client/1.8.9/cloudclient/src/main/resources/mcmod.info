@@ -3,7 +3,7 @@
   "modid": "cloudmc",
   "name": "MixClient",
   "description": "MixClient - a 1.8.9 Minecraft PVP client",
-  "version": "1.4.1",
+  "version": "${version}",
   "mcversion": "1.8.9",
   "url": "https://github.com/Mix-Studios/client-mix",
   "updateUrl": "https://github.com/Mix-Studios/client-mix/releases",

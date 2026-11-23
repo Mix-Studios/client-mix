@@ -143,6 +143,29 @@ tasks.register('bundleClient', Sync) {
 
     doLast {
         def outputDir = layout.buildDirectory.dir('generated/client').get().asFile
+
+        // The version a client jar declares in its own metadata. The file name proves
+        // nothing: a renamed jar, or one whose name merely contains the version, would
+        // otherwise pass.
+        def declaredClientVersion = { File jar ->
+            def zip = new java.util.zip.ZipFile(jar)
+            try {
+                def entry = zip.getEntry('fabric.mod.json') ?: zip.getEntry('mcmod.info')
+                if (entry == null) {
+                    return null
+                }
+                def metadata = new groovy.json.JsonSlurper().parseText(
+                        zip.getInputStream(entry).getText('UTF-8'))
+                // fabric.mod.json is one object; mcmod.info is an array of mods.
+                if (metadata instanceof List) {
+                    metadata = metadata.isEmpty() ? null : metadata[0]
+                }
+                return metadata?.version?.toString()
+            } finally {
+                zip.close()
+            }
+        }
+
         def modules = []
         if (clientLibs.isDirectory()) {
             clientLibs.eachDir { versionDir ->
@@ -163,15 +186,24 @@ tasks.register('bundleClient', Sync) {
                     + " in ${clientLibs}. Build the client for this release first.")
         }
 
+        // ...with a declared version we can actually check.
+        def declared = modules.collectEntries { module ->
+            [(module): declaredClientVersion(new File(clientLibs, "${module.gameVersion}/${module.file}"))]
+        }
+        def unversioned = modules.findAll { declared[it] == null }
+        if (!unversioned.isEmpty()) {
+            throw new GradleException("bundleClient: "
+                    + unversioned.collect { "${it.gameVersion}/${it.file}" }.join(', ')
+                    + " declares no version in fabric.mod.json or mcmod.info; rebuild the client for this release.")
+        }
+
         // ...and never a client built for a different launcher version: the client and the
         // launcher ship as one version, so updating the client always updates the launcher.
-        def stale = modules.findAll { module ->
-            !module.file.contains(bundledClientVersion)
-        }
+        def stale = modules.findAll { declared[it] != bundledClientVersion }
         if (!stale.isEmpty()) {
             throw new GradleException("bundleClient: "
-                    + stale.collect { "${it.gameVersion}/${it.file}" }.join(', ')
-                    + " isn't built for client ${bundledClientVersion}; rebuild the client for this release.")
+                    + stale.collect { "${it.gameVersion}/${it.file} declares client ${declared[it]}" }.join(', ')
+                    + ", but this launcher is client ${bundledClientVersion}; rebuild the client for this release.")
         }
 
         def index = new groovy.json.JsonBuilder([
